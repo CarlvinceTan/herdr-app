@@ -216,9 +216,11 @@ mod native {
             ("manifest.json", include_str!("autofill/manifest.json")),
             ("background.js", include_str!("autofill/background.js")),
             ("content.js", include_str!("autofill/content.js")),
+            ("webauthn.js", include_str!("autofill/webauthn.js")),
         ]),
     ];
     const AUTOFILL_HOST: &str = "dev.herdr.autofill";
+    const OLD_WORKERS_KEPT: usize = 5;
 
     fn write_own_extensions(cache: &std::path::Path) {
         use sha2::{Digest, Sha256};
@@ -232,13 +234,16 @@ mod native {
             let hash = hash.finalize();
             let version = format!("1.{}.{}", u16::from_be_bytes([hash[0], hash[1]]), u16::from_be_bytes([hash[2], hash[3]]));
             // It also keeps running a cached copy of the worker script, so the script's name changes too.
+            // The first session after a change can still restart the old one, so the last few stay.
             let worker = format!("background-{:02x}{:02x}{:02x}{:02x}.js", hash[0], hash[1], hash[2], hash[3]);
             if let Ok(old) = std::fs::read_dir(&folder) {
-                for entry in old.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with("background") && name.ends_with(".js") && name != worker {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
+                let mut workers: Vec<(std::time::SystemTime, PathBuf)> = old.flatten()
+                    .filter(|entry| { let name = entry.file_name().to_string_lossy().into_owned(); name.starts_with("background-") && name.ends_with(".js") && name != worker })
+                    .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+                    .collect();
+                workers.sort();
+                for (_, path) in workers.iter().rev().skip(OLD_WORKERS_KEPT) {
+                    let _ = std::fs::remove_file(path);
                 }
             }
             for (name, text) in files {

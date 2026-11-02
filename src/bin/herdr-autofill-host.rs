@@ -31,10 +31,22 @@ mod host {
         totp: bool,
     }
 
+    // HERDR_AUTOFILL_DEBUG names a file for timings while testing; never a secret.
+    fn note(what: &str) {
+        let Some(path) = std::env::var_os("HERDR_AUTOFILL_DEBUG") else { return };
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{at} {} {what}", std::process::id());
+        }
+    }
+
     pub fn main() {
+        note("started");
         let Some(request) = read_message() else { return };
+        note(&format!("asked {}", request["type"].as_str().unwrap_or("?")));
         let reply = answer(&request).unwrap_or_else(|error| json!({ "error": error }));
         write_message(&reply);
+        note("answered");
     }
 
     // Chrome's framing: a 4-byte length in native byte order, then that much JSON.
@@ -89,10 +101,90 @@ mod host {
                 confirm(&format!("fill a verification code for {site}"))?;
                 Ok(json!({ "code": vault(&["totp", &account.title])?["code"] }))
             }
+            // Addresses fill without Touch ID, as Safari's contact details do; a card asks first.
+            Some("addresses") => Ok(json!({
+                "addresses": own_entries(|entry| ["street", "postcode"].iter().any(|name| entry["fields"].get(name).is_some()))?
+                    .iter().map(|entry| json!({ "title": entry["title"], "fields": entry["fields"] })).collect::<Vec<_>>(),
+            })),
+            Some("cards") => Ok(json!({
+                "cards": own_entries(is_card)?.iter().map(|entry| json!({ "title": entry["title"] })).collect::<Vec<_>>(),
+            })),
+            Some("card") => {
+                let title = request["title"].as_str().ok_or("no card chosen")?;
+                if !own_entries(is_card)?.iter().any(|entry| entry["title"] == title) {
+                    return Err("no such card".into());
+                }
+                confirm(&format!("fill your card {title}"))?;
+                Ok(json!({ "fields": vault(&["fields", title])?["fields"] }))
+            }
+            // A site asking for a passkey: the vault's, served into this page through the debug port.
+            Some("passkey") => passkey(request, url),
             // A code from Messages needs no Touch ID: it's only filled into the field that asked.
             Some("messages") => Ok(message_code(&site).map_or(json!({}), |(code, for_site)| json!({ "code": code, "forSite": for_site }))),
             _ => Err("unknown request".into()),
         }
+    }
+
+    // How long `vault passkey` may take to attach to the page before the site's request goes on.
+    const PASSKEY_READY: Duration = Duration::from_secs(10);
+    // How long it then waits for the site to finish signing in or registering.
+    const PASSKEY_CEREMONY: &str = "90";
+
+    // Before a site's own navigator.credentials call: with Touch ID, `vault passkey use` (sign in) or
+    // `register` (a new passkey) attaches to this page and serves or captures the passkey, so the
+    // site's request completes from the vault rather than Chromium's own passkey prompts. It keeps
+    // its connection open until the ceremony ends, so it's left running.
+    fn passkey(request: &Value, url: &str) -> Result<Value, String> {
+        let host = host_of(url).ok_or("not a web page")?;
+        let rp = request["rpId"].as_str().filter(|rp| !rp.is_empty()).map_or_else(|| site_of(&host), str::to_ascii_lowercase);
+        // The relying party has to be this page's host or a domain it sits under, as WebAuthn requires.
+        if !(host == rp || host.ends_with(&format!(".{rp}"))) || site_of(&rp) != site_of(&host) {
+            return Err("that passkey isn't for this site".into());
+        }
+        let signing_in = request["mode"].as_str() != Some("create");
+        if signing_in {
+            let stored = vault(&["passkey", "list"])?;
+            let has = stored["passkeys"].as_array().is_some_and(|keys| keys.iter().any(|key| key["rpId"].as_str() == Some(rp.as_str())));
+            if !has {
+                return Ok(json!({ "none": true }));
+            }
+        }
+        confirm(&if signing_in { format!("sign in to {rp} with a passkey") } else { format!("save a passkey for {rp}") })?;
+        let log = std::env::temp_dir().join(format!("herdr-passkey-{}.json", std::process::id()));
+        let file = std::fs::File::create(&log).map_err(|e| format!("can't make a log: {e}"))?;
+        let errors = file.try_clone().map_err(|e| format!("can't make a log: {e}"))?;
+        let mut command = vault_command(&["passkey", if signing_in { "use" } else { "register" }, "--rp", &rp, "--target", url, "--timeout", PASSKEY_CEREMONY]);
+        command.stdin(std::process::Stdio::null()).stdout(file).stderr(errors);
+        // Chromium ends the helper's whole process group once it has answered, and holds the answer
+        // back while that group lives; the vault has to outlast it, in a group of its own.
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|e| format!("can't run vault: {e}"))?;
+        note("vault started");
+        let started = std::time::Instant::now();
+        while started.elapsed() < PASSKEY_READY {
+            if std::fs::read_to_string(&log).is_ok_and(|text| text.contains("\"ready\"")) {
+                let _ = std::fs::remove_file(&log);
+                return Ok(json!({ "ready": true }));
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        // The vault's own words, which never hold a secret.
+        let why = std::fs::read_to_string(&log).ok().and_then(|text| text.lines().last().map(str::to_owned)).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        Err(format!("the vault couldn't reach the page: {why}"))
+    }
+
+    // Entries with fields of their own (`vault put --field`), for addresses and cards.
+    fn own_entries(keep: impl Fn(&Value) -> bool) -> Result<Vec<Value>, String> {
+        Ok(vault(&["list"])?["entries"].as_array().into_iter().flatten().filter(|entry| keep(entry)).cloned().collect())
+    }
+
+    fn is_card(entry: &Value) -> bool {
+        entry["secretFields"].as_array().is_some_and(|names| names.iter().any(|name| name == "number"))
     }
 
     // How far back a code from Messages still counts.
@@ -173,7 +265,7 @@ mod host {
 
     // The user's vault CLI. HERDR_VAULT names it; HERDR_VAULT_HOME runs it with another HOME, which
     // keeps a test vault apart from the real one (whose path is in ~/.config/opencode/vault.json).
-    fn vault(args: &[&str]) -> Result<Value, String> {
+    fn vault_command(args: &[&str]) -> Command {
         let home = std::env::var("HOME").unwrap_or_default();
         let program = std::env::var("HERDR_VAULT").map(PathBuf::from).unwrap_or_else(|_| {
             let mine = PathBuf::from(&home).join("code/cstack/vault/bin/vault");
@@ -184,7 +276,11 @@ mod host {
         if let Ok(test_home) = std::env::var("HERDR_VAULT_HOME") {
             command.env("HOME", test_home);
         }
-        let output = command.output().map_err(|e| format!("can't run vault: {e}"))?;
+        command
+    }
+
+    fn vault(args: &[&str]) -> Result<Value, String> {
+        let output = vault_command(args).output().map_err(|e| format!("can't run vault: {e}"))?;
         if !output.status.success() {
             let why = String::from_utf8_lossy(&output.stderr);
             return Err(why.lines().next().unwrap_or("vault failed").to_owned());
