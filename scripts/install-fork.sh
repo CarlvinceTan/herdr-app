@@ -14,6 +14,9 @@ codesign --verify --deep --strict "$root/target/install/Herdr.app"
 
 rm -rf "$app.new"
 ditto "$root/target/install/Herdr.app" "$app.new"
+# The build copy has the same id, so macOS could pick it for "Herdr"; only the installed one stays.
+"$lsregister" -u "$root/target/install/Herdr.app" 2>/dev/null || true
+rm -rf "$root/target/install"
 
 # Quit the running one and wait for it to go.
 if pgrep -f "^$app/Contents/MacOS/Herdr\$" >/dev/null; then
