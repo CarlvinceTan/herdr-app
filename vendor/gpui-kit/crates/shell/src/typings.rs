@@ -3171,6 +3171,8 @@ const BASE: &str = r#"  /** A row. */
     }) => EditorState;
   };
   export const Editor: { new: (state: EditorState) => NativeElement };
+  // HERDR: a real web page, kept by id across renders. `web.do` commands drive it.
+  export const WebView: { new: (id: string) => NativeElement };
 
   /** One thumb, or the two ends of a range. */
   export type SliderValue = number | [number, number];

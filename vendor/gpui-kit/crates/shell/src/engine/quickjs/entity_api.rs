@@ -538,6 +538,16 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
+    // HERDR: a native web page, kept by id.
+    let web_view_element = runtime.clone();
+    globals.set(
+        "__web_view_element",
+        Func::from(move |ctx: Ctx<'_>, id: String| -> JsResult<SpecId> {
+            let store = alive(&ctx, &web_view_element)?;
+            Ok(store.push_component(Component::WebView(id)))
+        }),
+    )?;
+
     // Sliders. A slider's value is retained for the same reason an input's
     // text is, and for one more: a drag writes it from a GPUI listener with no
     // script in the loop, so there is nowhere else it could live.

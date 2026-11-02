@@ -59,6 +59,8 @@ extern crate gpui_fast_platform as gpui_platform;
 
 pub(crate) mod a11y;
 pub mod action;
+// HERDR: a real web page as an element.
+pub mod web_view;
 pub(crate) mod assets;
 pub(crate) mod capability;
 mod component;

@@ -1188,6 +1188,8 @@ pub(crate) mod exports {
         // HERDR: source editor exports in gpui-base.
         "Editor",
         "EditorState",
+        // HERDR: a native web page.
+        "WebView",
         "Textarea",
         "TextView",
         "TextareaState",
@@ -7040,6 +7042,7 @@ globalThis.__gpui = (() => {
       },
     },
     Editor: { new: (state) => element(__editor_element(state.__handle)) },
+    WebView: { new: (id) => element(__web_view_element(String(id))) },
     TextareaState: {
       new: (options) =>
         textareaState(

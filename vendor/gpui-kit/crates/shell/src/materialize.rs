@@ -1603,6 +1603,8 @@ fn materialize_component(
         Component::Editor(handle) => {
             components::editor::editor(runtime, handle, refinement, behavior, states, children, cx)
         }
+        // HERDR: a native web page.
+        Component::WebView(id) => crate::web_view::web_view(id, refinement),
         Component::NumberInput(handle) => components::number_input::number_input(
             runtime, snapshot, arena, handle, inherited, refinement, behavior, states, slot_specs,
             children, window, cx,
@@ -2531,6 +2533,7 @@ fn motion_element_id(
         Component::Editor(handle) => {
             gpui::ElementId::NamedInteger("gpui-shell-editor".into(), *handle)
         }
+        Component::WebView(id) => gpui::ElementId::Name(id.clone().into()),
         Component::NumberInput(handle) => {
             gpui::ElementId::NamedInteger("gpui-shell-number-input".into(), *handle)
         }

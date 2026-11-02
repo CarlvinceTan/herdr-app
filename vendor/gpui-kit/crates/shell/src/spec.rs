@@ -264,6 +264,8 @@ pub(crate) enum Component {
     Textarea(crate::entities::EntityHandle),
     // HERDR: source-code editor element, backed by retained EditorState.
     Editor(crate::entities::EntityHandle),
+    // HERDR: a native web page, kept by this id across renders.
+    WebView(String),
 
     /// A spinbutton frame over the same `InputState` a [`Component::Input`]
     /// holds: there is no numeric state type, only a text state carrying a
@@ -688,6 +690,7 @@ impl Component {
             Component::Textarea(_) => "Textarea",
             // HERDR: source editor in spec diagnostics.
             Component::Editor(_) => "Editor",
+            Component::WebView(_) => "WebView",
             Component::NumberInput(_) => "NumberInput",
             Component::OtpInput(_) => "OtpInput",
             Component::Svg(_) => "svg",

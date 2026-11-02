@@ -2633,7 +2633,39 @@ impl AppWindow {
 
     /// Runs a command for the person (keys, clicks, menus, mods): a missing
     /// name is asked for.
+    // The browser pane's commands, which touch nothing else.
+    fn run_web(&mut self, name: &str, args: &Value, window: &mut Window, cx: &mut Context<Self>) {
+        match name {
+            "web.do" => {
+                let text = |key| Self::arg(args, key).unwrap_or("");
+                gpui_shell::web_view::command(text("id"), text("op"), text("arg"));
+            }
+            "web.report" => {
+                let pages = gpui_shell::web_view::pages().into_iter()
+                    .map(|(id, url, title, asked)| (id, json!({ "url": url, "title": title, "asked": asked })))
+                    .collect::<serde_json::Map<String, Value>>();
+                let pages = Value::Object(pages);
+                if crate::mods::shared("web.pages").as_ref() != Some(&pages) {
+                    crate::mods::set_shared("web.pages".into(), pages);
+                }
+            }
+            // A press on a page: its pane takes the focus. A page's id is its slot.
+            _ => {
+                let id = Self::arg(args, "id").unwrap_or("");
+                let slots = crate::mods::shared("browser.slots");
+                let pane = slots.as_ref().and_then(Value::as_object)
+                    .and_then(|slots| slots.iter().find(|(_, slot)| slot.to_string() == id).map(|(pane, _)| pane.clone()));
+                if let Some(pane) = pane {
+                    self.run("pane.focus", json!({ "pane": pane }), window, cx);
+                }
+            }
+        }
+    }
+
     fn run(&mut self, name: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
+        if name.starts_with("web.") {
+            return self.run_web(name, &args, window, cx);
+        }
         // A click or key has nobody to read the reply: show why it failed.
         if let Some(error) = self.run_as(name, args, true, window, cx).get("error").and_then(Value::as_str) {
             let spec = json!({"kind":"toast", "notification":{"title":format!("{name} failed"),"body":error,"level":"error"}});
@@ -4156,6 +4188,7 @@ impl AppWindow {
 
     fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
+        gpui_shell::web_view::set_suspended(self.overlays.iter().any(|o| o.kind == OverlayKind::Dialog));
         let mut toast_y = 16.0;
         // Drawn last, so it stays clickable over an open dialog.
         let pill = self.render_update_pill(cx);
