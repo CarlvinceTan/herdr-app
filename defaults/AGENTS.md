@@ -594,7 +594,12 @@ The main ones:
   `hole` with `"x y w h"` to let clicks through, `show`, `hide`, `remove`).
   `web.report` publishes each page's `{url, title, asked, shown}` to the shared
   `web.pages`; `web.clicked {id}` is what a press on a page sends, and focuses
-  the pane that holds it.
+  the pane that holds it. Agents drive pages through Chrome's DevTools protocol
+  at `http://127.0.0.1:9333` (see `browser_debug_port`): `/json/list` lists them,
+  and a pane's page matches its `web.pages` entry by url and title. Tools that
+  take a browser URL attach there (chrome-devtools-mcp `--browserUrl`, Playwright
+  `connectOverCDP`). A page made through the protocol has no window; close it
+  when done. Every page shares one profile, so one sign-in covers them all.
 
 When the user runs a command without a required name (a key, a click), Herdr
 asks them. **You never get a dialog**: pass every required argument, or the

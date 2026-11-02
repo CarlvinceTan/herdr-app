@@ -72,14 +72,15 @@ mod native {
     use std::ffi::{CStr, CString, c_void};
     use std::path::PathBuf;
     use std::sync::Once;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use cef::{
-        App, Browser, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
-        Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplClient, ImplCommandLine, ImplFrame, ImplNavigationEntry,
+        App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
+        Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, LifeSpanHandler, PopupFeatures, Rect as CefRect, RuntimeStyle, Settings,
-        WindowInfo, WindowOpenDisposition, WrapApp, WrapClient, WrapLifeSpanHandler,
-        rc::Rc as _, wrap_app, wrap_client, wrap_life_span_handler,
+        WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler,
+        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
     use objc::declare::ClassDecl;
@@ -133,7 +134,11 @@ mod native {
     const SHIFT_KEY: u64 = 1 << 17;
     const WIDTH_AND_HEIGHT: u64 = 2 | 16;
     const BOTTOM_LEFT_AND_RIGHT: u64 = 1 | 2;
-    const PUMP_EVERY: Duration = Duration::from_millis(8);
+    const PUMP_AT_LEAST_EVERY: Duration = Duration::from_millis(250);
+    const SEAL_EVERY: Duration = Duration::from_secs(1);
+    const DEBUG_PORT_WAIT: Duration = Duration::from_millis(500);
+    const LEAN_FEATURES_OFF: &str = "NativeNotifications,SystemNotifications,SpareRendererForSitePerProcess,MediaRouter,\
+        DialMediaRouteProvider,OptimizationHints,OptimizationGuideModelDownloading,Translate";
     // Chrome counts zoom in powers of this.
     const ZOOM_BASE: f64 = 1.2;
 
@@ -157,15 +162,25 @@ mod native {
         static LAST_CLICK: Cell<f64> = const { Cell::new(0.0) };
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
-        static PUMPING: Cell<bool> = const { Cell::new(false) };
+        static IN_CEF: Cell<bool> = const { Cell::new(false) };
+        static LAST_SEAL: Cell<Option<Instant>> = const { Cell::new(None) };
+        static PUMP_AGAIN: Cell<bool> = const { Cell::new(false) };
         // Addresses sent before their page's view has drawn.
         static WAITING: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     }
 
+    // One profile for every copy of the app, so a sign-in holds everywhere. Tests point elsewhere.
     fn state_dir() -> PathBuf {
-        std::env::var("XDG_STATE_HOME").map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"))
-            .join("herdr-browser")
+        std::env::var("HERDR_BROWSER_STATE").map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/herdr-browser"))
+    }
+
+    // Chromium names an extension loaded from a folder after that folder's real path.
+    fn ublock_id() -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let path = std::fs::canonicalize(state_dir().join("ublock")).ok()?;
+        let hash = Sha256::digest(path.to_string_lossy().as_bytes());
+        Some(hash[..16].iter().flat_map(|byte| [byte >> 4, byte & 15]).map(|n| (b'a' + n) as char).collect())
     }
 
     fn zoom_level(factor: f64) -> f64 {
@@ -176,19 +191,41 @@ mod native {
         struct HerdrCefApp;
 
         impl App {
+            fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
+                Some(PumpScheduler::new())
+            }
+
             // Extensions come in as they would for Chromium itself.
             fn on_before_command_line_processing(&self, process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
                 let is_browser = process_type.is_none_or(|kind| kind.to_string().is_empty());
                 let (true, Some(line)) = (is_browser, command_line) else { return };
-                // Pages can't post to macOS here, so its notifications helper would sit idle.
-                line.append_switch(Some(&CefString::from("disable-notifications")));
-                line.append_switch_with_value(Some(&CefString::from("disable-features")), Some(&CefString::from("NativeNotifications,SystemNotifications")));
+                let switch = |name: &str, value: Option<&str>| match value {
+                    Some(value) => line.append_switch_with_value(Some(&CefString::from(name)), Some(&CefString::from(value))),
+                    None => line.append_switch(Some(&CefString::from(name))),
+                };
+                // Kept lean: pages of one site share a renderer, no spare one waits for the next
+                // site, and nothing fetches or casts in the background. Pages can't post to
+                // macOS, so the notifications helper would only sit idle.
+                switch("process-per-site", None);
+                switch("disable-background-networking", None);
+                switch("disable-notifications", None);
+                switch("disable-features", Some(LEAN_FEATURES_OFF));
                 let ublock = state_dir().join("ublock");
                 if ublock.join("manifest.json").exists() {
                     let path = CefString::from(ublock.to_string_lossy().as_ref());
                     line.append_switch_with_value(Some(&CefString::from("load-extension")), Some(&path));
                     line.append_switch_with_value(Some(&CefString::from("disable-extensions-except")), Some(&path));
                 }
+            }
+        }
+    }
+
+    wrap_browser_process_handler! {
+        struct PumpScheduler;
+
+        impl BrowserProcessHandler {
+            fn on_schedule_message_pump_work(&self, delay_ms: i64) {
+                schedule(delay_ms);
             }
         }
     }
@@ -275,6 +312,16 @@ mod native {
                 return false;
             }
             STARTED.set(true);
+            // The debugging port opens on a thread of its own a moment later. It's sealed before
+            // the app goes on to start any children, the core among them.
+            if debug_port > 0 {
+                let port = std::net::SocketAddr::from(([127, 0, 0, 1], debug_port as u16));
+                let deadline = Instant::now() + DEBUG_PORT_WAIT;
+                while Instant::now() < deadline && std::net::TcpStream::connect_timeout(&port, Duration::from_millis(20)).is_err() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            seal_fds();
             unsafe {
                 let app: Id = msg_send![class!(NSApplication), sharedApplication];
                 let _: () = msg_send![app, setBeforeTerminate: finish as extern "C" fn() as *mut c_void];
@@ -283,20 +330,73 @@ mod native {
         }
     }
 
-    // CEF's work runs on the app's own loop, from the first page on.
-    fn pump(cx: &mut GpuiApp) {
-        if PUMPING.replace(true) {
-            return;
-        }
-        let timer = cx.background_executor().clone();
-        cx.foreground_executor().spawn(async move {
-            loop {
-                timer.timer(PUMP_EVERY).await;
-                if STARTED.get() {
-                    cef::do_message_loop_work();
+    // CEF's work runs on the main queue when CEF says it's due, from any thread, or at worst every
+    // PUMP_AT_LEAST_EVERY. A newer timed request replaces the one waiting; one due now always runs.
+    unsafe extern "C" {
+        static _dispatch_main_q: u8;
+        fn dispatch_async_f(queue: *const u8, context: *mut c_void, work: extern "C" fn(*mut c_void));
+        fn dispatch_after_f(when: u64, queue: *const u8, context: *mut c_void, work: extern "C" fn(*mut c_void));
+        fn dispatch_time(when: u64, delta: i64) -> u64;
+    }
+
+    // Chromium opens files and sockets without close-on-exec, since its own launcher closes them
+    // in its children. The app's children would inherit them: a core started by the app held the
+    // debugging port long after the app quit. So they're sealed after start and then now and then.
+    fn seal_fds() {
+        let Ok(dir) = std::fs::read_dir("/dev/fd") else { return };
+        let fds: Vec<i32> = dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok()).collect();
+        for fd in fds.into_iter().filter(|fd| *fd > 2) {
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
                 }
             }
-        }).detach();
+        }
+    }
+
+    static PUMP_TICKET: AtomicU64 = AtomicU64::new(0);
+    static PUMP_WAITING: AtomicBool = AtomicBool::new(false);
+
+    fn schedule(delay_ms: i64) {
+        let main = unsafe { &raw const _dispatch_main_q };
+        if delay_ms <= 0 {
+            unsafe { dispatch_async_f(main, std::ptr::null_mut(), pump_now) };
+            return;
+        }
+        let ticket = PUMP_TICKET.fetch_add(1, Ordering::SeqCst) + 1;
+        PUMP_WAITING.store(true, Ordering::SeqCst);
+        let delay = Duration::from_millis(delay_ms as u64).min(PUMP_AT_LEAST_EVERY);
+        unsafe { dispatch_after_f(dispatch_time(0, delay.as_nanos() as i64), main, ticket as *mut c_void, pump_later) };
+    }
+
+    extern "C" fn pump_later(ticket: *mut c_void) {
+        if ticket as u64 == PUMP_TICKET.load(Ordering::SeqCst) {
+            PUMP_WAITING.store(false, Ordering::SeqCst);
+            pump_now(std::ptr::null_mut());
+        }
+    }
+
+    extern "C" fn pump_now(_: *mut c_void) {
+        if !STARTED.get() {
+            return;
+        }
+        if LAST_SEAL.get().is_none_or(|at| at.elapsed() >= SEAL_EVERY) {
+            LAST_SEAL.set(Some(Instant::now()));
+            seal_fds();
+        }
+        // CEF can turn the run loop while it works, which can land back here.
+        if IN_CEF.replace(true) {
+            PUMP_AGAIN.set(true);
+            return;
+        }
+        cef::do_message_loop_work();
+        IN_CEF.set(false);
+        if PUMP_AGAIN.take() {
+            schedule(0);
+        } else if !PUMP_WAITING.load(Ordering::SeqCst) {
+            schedule(PUMP_AT_LEAST_EVERY.as_millis() as i64);
+        }
     }
 
     fn ns_string(text: &str) -> Id {
@@ -483,11 +583,10 @@ mod native {
         cef::shutdown();
     }
 
-    pub fn place(window: &Window, id: &str, bounds: Bounds<Pixels>, cx: &mut GpuiApp) {
+    pub fn place(window: &Window, id: &str, bounds: Bounds<Pixels>, _cx: &mut GpuiApp) {
         if !STARTED.get() {
             return;
         }
-        pump(cx);
         let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
         let gpui_view = handle.ns_view.as_ptr() as Id;
@@ -521,7 +620,12 @@ mod native {
         // Creating a browser runs the message loop, which reaches back into VIEWS.
         if let Some(host) = created {
             let url = WAITING.with_borrow_mut(|waiting| waiting.remove(id)).unwrap_or_else(|| "about:blank".to_owned());
+            let nested = IN_CEF.replace(true);
             let browser = create_browser(host, &url, width as i32, height as i32);
+            IN_CEF.set(nested);
+            if !nested && PUMP_AGAIN.take() {
+                schedule(0);
+            }
             VIEWS.with_borrow_mut(|views| {
                 if let Some(view) = views.get_mut(id) {
                     view.browser = browser;
@@ -684,6 +788,11 @@ mod native {
                 "back" => browser.go_back(),
                 "forward" => browser.go_forward(),
                 "reload" => browser.reload(),
+                "ublock" => {
+                    if let (Some(id), Some(frame)) = (ublock_id(), browser.main_frame()) {
+                        frame.load_url(Some(&CefString::from(format!("chrome-extension://{id}/dashboard.html").as_str())));
+                    }
+                }
                 "zoom" | "clear-data" | "hole" | "show" | "hide" => {}
                 other => tracing::warn!("web view: unknown command {other:?}"),
             }
