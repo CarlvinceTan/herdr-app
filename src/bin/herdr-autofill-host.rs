@@ -89,8 +89,67 @@ mod host {
                 confirm(&format!("fill a verification code for {site}"))?;
                 Ok(json!({ "code": vault(&["totp", &account.title])?["code"] }))
             }
+            // A code from Messages needs no Touch ID: it's only filled into the field that asked.
+            Some("messages") => Ok(message_code(&site).map_or(json!({}), |(code, for_site)| json!({ "code": code, "forSite": for_site }))),
             _ => Err("unknown request".into()),
         }
+    }
+
+    // How far back a code from Messages still counts.
+    const MESSAGE_CODE_AGE: u64 = 3 * 60;
+    // Messages counts time in nanoseconds from 2001.
+    const APPLE_EPOCH: u64 = 978_307_200;
+    const CODE_WORDS: [&str; 8] = ["code", "verification", "verify", "otp", "passcode", "one-time", "2fa", "pin"];
+
+    // The newest verification code in Messages from the last few minutes, and whether it's this
+    // site's: a domain-bound "@site #code" line, or the message naming the site. Reading the Messages
+    // database needs Full Disk Access for Herdr; without it there's simply no code.
+    fn message_code(site: &str) -> Option<(String, bool)> {
+        let db = std::env::var("HERDR_MESSAGES_DB").map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Messages/chat.db"));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        let since = (now.saturating_sub(MESSAGE_CODE_AGE).saturating_sub(APPLE_EPOCH)) as u128 * 1_000_000_000;
+        let query = format!("SELECT text, hex(attributedBody) AS body FROM message WHERE is_from_me = 0 AND date > {since} ORDER BY date DESC LIMIT 10");
+        let output = Command::new("/usr/bin/sqlite3").args(["-readonly", "-json"]).arg(&db).arg(query).output().ok()?;
+        let rows: Vec<Value> = serde_json::from_slice(&output.stdout).ok()?;
+        let name = site.split('.').next().unwrap_or(site).to_ascii_lowercase();
+        rows.iter().find_map(|row| {
+            let text = row["text"].as_str().map(str::to_owned).or_else(|| row["body"].as_str().and_then(attributed_text))?;
+            Some(match bound_code(&text) {
+                Some((domain, code)) => (code, site_of(&domain) == site),
+                None => (code_in(&text)?, text.to_ascii_lowercase().contains(&name)),
+            })
+        })
+    }
+
+    // Newer Messages keeps the text only in an archived NSAttributedString: the string follows
+    // "NSString", a marker byte "+", and its length.
+    fn attributed_text(hex: &str) -> Option<String> {
+        let bytes: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect();
+        let at = bytes.windows(8).position(|w| w == b"NSString")? + 8;
+        let plus = bytes[at..].iter().position(|b| *b == b'+')? + at + 1;
+        let (length, start) = match *bytes.get(plus)? {
+            0x81 => (u16::from_le_bytes([*bytes.get(plus + 1)?, *bytes.get(plus + 2)?]) as usize, plus + 3),
+            n => (n as usize, plus + 1),
+        };
+        String::from_utf8(bytes.get(start..start + length)?.to_vec()).ok()
+    }
+
+    // The standard's domain-bound line: "@example.com #123456".
+    fn bound_code(text: &str) -> Option<(String, String)> {
+        let line = text.lines().last()?.trim();
+        let (domain, code) = line.strip_prefix('@')?.split_once(" #")?;
+        let code = code.split_whitespace().next()?;
+        (!domain.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric())).then(|| (domain.to_ascii_lowercase(), code.to_owned()))
+    }
+
+    // A 4 to 8 digit run in a message that reads like a code ("G-123456" counts as 123456).
+    fn code_in(text: &str) -> Option<String> {
+        let lower = text.to_ascii_lowercase();
+        if !CODE_WORDS.iter().any(|word| lower.contains(word)) {
+            return None;
+        }
+        lower.split(|c: char| !c.is_ascii_digit()).find(|run| (4..=8).contains(&run.len())).map(str::to_owned)
     }
 
     fn host_of(url: &str) -> Option<String> {

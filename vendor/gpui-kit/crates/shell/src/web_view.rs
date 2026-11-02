@@ -221,12 +221,36 @@ mod native {
     const AUTOFILL_HOST: &str = "dev.herdr.autofill";
 
     fn write_own_extensions(cache: &std::path::Path) {
+        use sha2::{Digest, Sha256};
         for (folder, files) in OWN_EXTENSIONS {
             let folder = state_dir().join(folder);
             let _ = std::fs::create_dir_all(&folder);
+            // Chromium keeps an extension's service worker until its version changes, so the version
+            // comes from the files themselves.
+            let mut hash = Sha256::new();
+            files.iter().for_each(|(_, text)| hash.update(text.as_bytes()));
+            let hash = hash.finalize();
+            let version = format!("1.{}.{}", u16::from_be_bytes([hash[0], hash[1]]), u16::from_be_bytes([hash[2], hash[3]]));
+            // It also keeps running a cached copy of the worker script, so the script's name changes too.
+            let worker = format!("background-{:02x}{:02x}{:02x}{:02x}.js", hash[0], hash[1], hash[2], hash[3]);
+            if let Ok(old) = std::fs::read_dir(&folder) {
+                for entry in old.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with("background") && name.ends_with(".js") && name != worker {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
             for (name, text) in files {
+                let text = if *name == "manifest.json" {
+                    text.replace("\"version\": \"1.0\"", &format!("\"version\": \"{version}\""))
+                        .replace("\"service_worker\": \"background.js\"", &format!("\"service_worker\": \"{worker}\""))
+                } else {
+                    (*text).to_owned()
+                };
+                let name = if *name == "background.js" { worker.as_str() } else { name };
                 let path = folder.join(name);
-                if std::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
+                if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
                     let _ = std::fs::write(&path, text);
                 }
             }

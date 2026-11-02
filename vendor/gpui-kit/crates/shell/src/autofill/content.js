@@ -72,16 +72,37 @@
     if (got?.code) fillCode(field, got.code);
   }
 
+  // A code field: the site's vault codes, and a recent one from Messages. One that's plainly this
+  // site's fills straight away; a Messages code that might be another site's waits for a click.
+  async function onCodeField(field, accounts) {
+    const scope = field.form ?? document;
+    const fromMessages = await ask({ type: "messages" });
+    if (document.activeElement !== field) return;
+    const totp = accounts.filter((account) => account.totp);
+    if (fromMessages?.code && fromMessages.forSite && !offered.has(scope)) {
+      offered.add(scope);
+      return fillCode(field, fromMessages.code);
+    }
+    if (!fromMessages?.code && totp.length === 1 && !offered.has(scope)) {
+      offered.add(scope);
+      return codeFrom(field, totp[0]);
+    }
+    const rows = totp.map((account) => ({ label: account.username || account.title, pick: () => codeFrom(field, account) }));
+    if (fromMessages?.code) rows.unshift({ label: `${fromMessages.code} · From Messages`, pick: () => { hide(); fillCode(field, fromMessages.code); } });
+    if (rows.length) show(field, rows);
+  }
+
   async function onFocus(event) {
     const field = event.target;
     const what = filling ? null : kind(field);
     if (!what) return;
     const { accounts = [] } = await ask({ type: "accounts" });
     if (document.activeElement !== field) return;
+    if (what === "code") return onCodeField(field, accounts);
     const scope = field.form ?? document;
-    const choices = what === "code" ? accounts.filter((account) => account.totp) : accounts;
+    const choices = accounts;
     if (!choices.length) return;
-    const pick = what === "code" ? (account) => codeFrom(field, account) : (account) => fillLogin(field, account);
+    const pick = (account) => fillLogin(field, account);
     if (choices.length === 1 && !offered.has(scope)) {
       offered.add(scope);
       return pick(choices[0]);

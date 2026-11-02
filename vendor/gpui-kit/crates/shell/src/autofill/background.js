@@ -19,6 +19,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       return value;
     }
     if (message.type === "fill" || message.type === "code") return ask({ type: message.type, title: message.title });
+    if (message.type === "messages") return ask({ type: "messages" });
     return { error: "unknown request" };
   })().then(reply, (error) => reply({ error: String(error) }));
   return true;
