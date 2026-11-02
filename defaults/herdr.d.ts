@@ -283,6 +283,9 @@ export function fonts(): string[];
  *  (`app.check_updates` starts a look). */
 export function updates(): {
   app: { version: string; ready: string | null; updates: boolean };
+  /** This fork: it never takes upstream's builds, only reports `upstream`'s latest release. */
+  fork: boolean;
+  upstream: { version: string; newer: boolean } | null;
   notes: { version: string; date: string; items: { headline: string; detail: string; fixed: boolean; media: { path: string; width: number; height: number }[] }[]; spotlight: boolean }[];
   core: { version: string | null; managed: string | null; ready: string | null; updating: boolean; error: string | null };
   checked: number | null;

@@ -10,6 +10,10 @@
 //! builds) sets `HERDR_APP_RELEASE`. `scripts/install-macos` makes a
 //! Herdr.app too, so the install's shape alone can't tell.
 //!
+//! This fork (any build without `HERDR_APP_RELEASE`) never takes upstream's
+//! builds, which would replace it with theirs. It only looks up upstream's
+//! latest release, for the settings screen, and checks the core as releases do.
+//!
 //! The core is checked on the same clock (`core/latest.json`): a newer core
 //! of the same generation is offered (also applied after an app update), unless
 //! a package manager owns it. Within a generation a newer core only adds.
@@ -116,19 +120,28 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
     c.managed = managed;
 }
 
+fn fork() -> bool {
+    option_env!("HERDR_APP_RELEASE").is_none()
+}
+
+static UPSTREAM: Mutex<Option<String>> = Mutex::new(None);
+
 fn checks_app() -> Option<PathBuf> {
     root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
 }
 
-/// A release build checks the core; a source build only when pointed at a test release server.
+/// Release builds and this fork check the core.
 fn checks_core() -> bool {
-    option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()
+    option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some() || fork()
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.
 pub fn status() -> serde_json::Value {
     serde_json::json!({
         "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some() },
+        "fork": fork(),
+        "upstream": UPSTREAM.lock().unwrap().as_ref()
+            .map(|v| serde_json::json!({ "version": v, "newer": newer(v, env!("CARGO_PKG_VERSION")) })),
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
@@ -182,6 +195,16 @@ pub fn start() {
                     }
                 }
             }
+            if fork() {
+                match check_upstream() {
+                    Ok(version) => *UPSTREAM.lock().unwrap() = Some(version),
+                    Err(e) => {
+                        tracing::warn!("upstream check: {e}");
+                        wait = RETRY;
+                        succeeded = false;
+                    }
+                }
+            }
             if core && let Err(e) = check_core() {
                 tracing::warn!("core update check: {e}");
                 wait = RETRY;
@@ -193,6 +216,14 @@ pub fn start() {
             sleep(wait);
         }
     });
+}
+
+/// Upstream's latest release, which this fork only reports.
+fn check_upstream() -> Result<String, String> {
+    let path = "app/latest.json";
+    let text = curl_text(&format!("{}/{path}", releases()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+    manifest["version"].as_str().map(str::to_owned).ok_or(format!("{path}: no version"))
 }
 
 fn checked_at(succeeded: bool, now: u64) -> Option<u64> {

@@ -733,12 +733,23 @@ export default class Settings extends View {
             : u.checks
               ? [result, check("st-check-core")]
               : ["Not checked: a build from source looks for no updates.", null];
+    const whatsNew = this.button(t, "st-whats-new", "What's new", () => { closeOverlay(props()?.overlay); run("app.whats_new"); });
+    // This fork never takes upstream's builds; it shows how far upstream has moved.
+    const upstream = !u.upstream
+      ? u.checking ? "Checking\u2026" : "Not checked yet. Check your connection and try again."
+      : u.upstream.newer
+        ? "Newer than your fork. Ask an agent to bring your fork up to it: FORK.md in your fork says how."
+        : `Your fork is up to date with it.${checked}`;
+    const appRows = u.fork
+      ? [
+          this.row(t, `Herdr ${u.app.version}`, "Your fork. It updates through git, not here.", h_flex().gap(8).flex_none().child(whatsNew)),
+          this.row(t, u.upstream ? `Upstream: Herdr ${u.upstream.version}` : "Upstream Herdr", upstream, check("st-check-upstream") ?? div()),
+        ]
+      : [this.row(t, `Herdr ${u.app.version}`, app[0], h_flex().gap(8).flex_none().child(whatsNew).when(Boolean(app[1]), (el) => el.child(app[1])))];
     return v_flex()
       .w_full()
       .child(this.heading(t, "Herdr"))
-      .child(this.row(t, `Herdr ${u.app.version}`, app[0], h_flex().gap(8).flex_none()
-        .child(this.button(t, "st-whats-new", "What's new", () => { closeOverlay(props()?.overlay); run("app.whats_new"); }))
-        .when(Boolean(app[1]), (el) => el.child(app[1]))))
+      .children(appRows)
       .child(div().h(18))
       .child(this.heading(t, "herdr-core"))
       .child(this.row(t, `herdr-core ${c.version ?? ""}`, core[0], core[1] ?? div()))
@@ -816,7 +827,7 @@ export default class Settings extends View {
   render(cx) {
     const t = theme();
     const u = updates();
-    const waiting = Boolean(u.app.ready || (u.core.ready && !u.core.managed));
+    const waiting = Boolean(u.app.ready || (u.core.ready && !u.core.managed) || u.upstream?.newer);
     const nav = v_flex()
       .flex_none()
       .w(190)
