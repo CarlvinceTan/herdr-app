@@ -1078,11 +1078,10 @@ impl MacWindow {
                 target_screen,
             );
             assert!(!native_window.is_null());
-            let () = msg_send![
-                native_window,
-                registerForDraggedTypes:
-                    NSArray::arrayWithObject(nil, NSFilenamesPboardType)
-            ];
+            // HERDR: promised files too (Photos, a screenshot's thumbnail, Mail), received on drop.
+            let promised: id = msg_send![class!(NSFilePromiseReceiver), readableDraggedTypes];
+            let types: id = msg_send![NSArray::arrayWithObject(nil, NSFilenamesPboardType), arrayByAddingObjectsFromArray: promised];
+            let () = msg_send![native_window, registerForDraggedTypes: types];
             let () = msg_send![
                 native_window,
                 setReleasedWhenClosed: NO
@@ -3617,7 +3616,9 @@ extern "C" fn dragging_entered(this: &Object, _: Sel, dragging_info: id) -> NSDr
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
-    let paths = external_paths_from_event(dragging_info);
+    // HERDR: a drag that only promises files (no path yet) is taken too, under its promised
+    // names; the real files come on the drop.
+    let paths = external_paths_from_event(dragging_info).or_else(|| unsafe { promised_names(dragging_info) });
     let taken = paths.map(|paths| FileDropEvent::Entered { position, paths }).is_some_and(|event| send_file_drop_event(window_state, event));
     if taken {
         if is_source_window {
@@ -3658,6 +3659,34 @@ extern "C" fn perform_drag_operation(this: &Object, _: Sel, dragging_info: id) -
         return YES;
     }
     send_file_drop_event(window_state, FileDropEvent::Submit { position }).to_objc()
+}
+
+// HERDR: stand-ins for a drag's promised files (their names, under the temp folder), for a drag
+// that has no paths of its own until it's dropped.
+unsafe fn promised_names(dragging_info: id) -> Option<ExternalPaths> {
+    unsafe {
+        let pasteboard: id = msg_send![dragging_info, draggingPasteboard];
+        let classes = NSArray::arrayWithObject(nil, class!(NSFilePromiseReceiver) as *const Class as id);
+        let receivers: id = msg_send![pasteboard, readObjectsForClasses: classes options: nil];
+        let count: NSUInteger = if receivers == nil { 0 } else { msg_send![receivers, count] };
+        if count == 0 {
+            return None;
+        }
+        let mut paths = SmallVec::new();
+        for i in 0..count {
+            let receiver: id = msg_send![receivers, objectAtIndex: i];
+            let names: id = msg_send![receiver, fileNames];
+            let named: NSUInteger = if names == nil { 0 } else { msg_send![names, count] };
+            for j in 0..named {
+                let name: id = msg_send![names, objectAtIndex: j];
+                paths.push(std::env::temp_dir().join(CStr::from_ptr(NSString::UTF8String(name)).to_string_lossy().into_owned()));
+            }
+            if named == 0 {
+                paths.push(std::env::temp_dir().join("promised-file"));
+            }
+        }
+        Some(ExternalPaths(paths))
+    }
 }
 
 // HERDR: asks the drag's source to write its promised files into a new folder under the temp
