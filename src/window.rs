@@ -4188,7 +4188,9 @@ impl AppWindow {
 
     fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
-        gpui_shell::web_view::set_suspended(self.overlays.iter().any(|o| o.kind == OverlayKind::Dialog));
+        // A web page draws above everything, so it steps aside for a dialog or a window (What's new,
+        // Welcome, Feedback). Popups cut their own hole in it instead.
+        gpui_shell::web_view::set_suspended(self.overlays.iter().any(|o| matches!(o.kind, OverlayKind::Dialog | OverlayKind::Window)));
         let mut toast_y = 16.0;
         // Drawn last, so it stays clickable over an open dialog.
         let pill = self.render_update_pill(cx);
