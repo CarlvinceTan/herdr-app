@@ -75,6 +75,38 @@ use std::{
 const NSUTF8StringEncoding: NSUInteger = 4;
 
 const MAC_PLATFORM_IVAR: &str = "platform";
+// Chromium picks its event loop by asking this, and its protocols only exist once CEF has loaded.
+extern "C" fn conforms_to_protocol(this: &Object, _: Sel, protocol: id) -> BOOL {
+    unsafe {
+        let name = std::ffi::CStr::from_ptr(protocol_getName(protocol.cast())).to_string_lossy();
+        if matches!(name.as_ref(), "CrAppProtocol" | "CrAppControlProtocol" | "CefAppProtocol") {
+            return YES;
+        }
+        msg_send![super(this, class!(NSApplication)), conformsToProtocol: protocol]
+    }
+}
+
+unsafe extern "C" {
+    fn protocol_getName(protocol: *mut std::ffi::c_void) -> *const std::ffi::c_char;
+}
+
+extern "C" fn is_handling_send_event(this: &Object, _: Sel) -> BOOL {
+    unsafe { *this.get_ivar("handlingSendEvent") }
+}
+
+extern "C" fn set_handling_send_event(this: &mut Object, _: Sel, handling: BOOL) {
+    unsafe { this.set_ivar("handlingSendEvent", handling) }
+}
+
+extern "C" fn send_event(this: &mut Object, _: Sel, event: id) {
+    unsafe {
+        let was: BOOL = *this.get_ivar("handlingSendEvent");
+        this.set_ivar("handlingSendEvent", YES);
+        let _: () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
+        this.set_ivar("handlingSendEvent", was);
+    }
+}
+
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
 
@@ -84,6 +116,12 @@ unsafe fn build_classes() {
         APP_CLASS = {
             let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
+            // HERDR: Chromium needs its application to say when it's dispatching an event.
+            decl.add_ivar::<BOOL>("handlingSendEvent");
+            decl.add_method(sel!(isHandlingSendEvent), is_handling_send_event as extern "C" fn(&Object, Sel) -> BOOL);
+            decl.add_method(sel!(setHandlingSendEvent:), set_handling_send_event as extern "C" fn(&mut Object, Sel, BOOL));
+            decl.add_method(sel!(sendEvent:), send_event as extern "C" fn(&mut Object, Sel, id));
+            decl.add_method(sel!(conformsToProtocol:), conforms_to_protocol as extern "C" fn(&Object, Sel, id) -> BOOL);
             decl.register()
         }
     };

@@ -148,6 +148,8 @@ fn main() {
         eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());
     }
 
+    // Chromium has to be up before the app's event loop runs.
+    gpui_shell::web_view::start();
     gpui_platform::application()
         .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
         .run(move |cx| {

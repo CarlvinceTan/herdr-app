@@ -2663,9 +2663,6 @@ impl AppWindow {
     }
 
     fn run(&mut self, name: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
-        if name.starts_with("web.") {
-            return self.run_web(name, &args, window, cx);
-        }
         // A click or key has nobody to read the reply: show why it failed.
         if let Some(error) = self.run_as(name, args, true, window, cx).get("error").and_then(Value::as_str) {
             let spec = json!({"kind":"toast", "notification":{"title":format!("{name} failed"),"body":error,"level":"error"}});
@@ -2775,6 +2772,9 @@ impl AppWindow {
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if name.starts_with("web.") {
+            return self.run_web(name, a, window, cx);
+        }
         let active_ctx = self.model.active_tab().map(|c| c.id.clone());
         match name {
             // ---- spaces

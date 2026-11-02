@@ -84,7 +84,7 @@ gpui-fast = { workspace = true, features = ["test-support"] }
 
 # HERDR: the native web view.
 [target.'cfg(target_os = "macos")'.dependencies]
-block = "0.1"
+cef = "=156.3.0"
 objc = "0.2"
 raw-window-handle = "0.6"
 
