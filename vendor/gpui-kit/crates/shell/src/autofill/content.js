@@ -114,6 +114,7 @@
     const pass = kind(field) === "password" ? field : passwords(scope)[0];
     if (user && got.username) setValue(user, got.username);
     if (pass && got.password) setValue(pass, got.password);
+    lastFilled = { username: got.username ?? "", password: got.password ?? "" };
   }
 
   // A code split across one-character boxes goes in box by box.
@@ -298,6 +299,108 @@
     menu.host.remove();
     menu = null;
   }
+
+  // Offering to save a login typed by hand: noticed as its form goes (submit, a submit button, Enter
+  // in a password field), offered on the page that comes next, or on this one if it stays.
+  const OFFER_AFTER = 1_500;
+  const OFFER_SHOWN = 12_000;
+  let lastFilled = null;
+  let offer = null;
+
+  function typedLogin(scope) {
+    const filled = [...scope.querySelectorAll("input[type=password]")].filter((el) => el.value);
+    if (!filled.length) return null;
+    // A change-password form's new password comes last.
+    const password = filled[filled.length - 1].value;
+    const user = [...scope.querySelectorAll("input")].find((el) => el.value && el.type !== "password" && el.type !== "hidden"
+      && (kind(el) === "username" || el.type === "email"));
+    return { username: user?.value ?? "", password };
+  }
+
+  async function noticeLogin(scope) {
+    const login = typedLogin(scope);
+    if (!login || (lastFilled && lastFilled.username === login.username && lastFilled.password === login.password)) return;
+    const { pending } = await ask({ type: "typed", ...login });
+    if (pending) setTimeout(checkOffer, OFFER_AFTER);
+  }
+
+  async function checkOffer() {
+    if (offer || window !== window.top) return;
+    const pending = await ask({ type: "pending" });
+    if (pending && "username" in pending) showOffer(pending);
+  }
+
+  function showOffer(pending) {
+    const host = document.createElement("herdr-autofill-save");
+    const root = host.attachShadow({ mode: "closed" });
+    const style = document.createElement("style");
+    style.textContent = `
+      :host { all: initial; }
+      .toast { position: fixed; z-index: 2147483647; top: 12px; right: 12px; width: 300px; box-sizing: border-box;
+        padding: 12px 12px 10px 14px; border-radius: 10px; background: #ffffff; color: #1f2328; border: 1px solid #d8dbe0;
+        box-shadow: 0 10px 28px rgba(0,0,0,.18); font: 13px/1.4 -apple-system, system-ui, sans-serif; transition: opacity .25s; }
+      .title { font-weight: 600; padding-right: 22px; }
+      .who { opacity: .7; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+      button { font: inherit; border-radius: 6px; padding: 4px 12px; cursor: default; border: 1px solid #d8dbe0; background: transparent; color: inherit; }
+      .save { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+      .close { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0; border: none; font-size: 16px; line-height: 20px; opacity: .55; }
+      .close:hover { opacity: 1; }
+      @media (prefers-color-scheme: dark) {
+        .toast { background: #2b2f36; color: #dcdfe4; border-color: #3d424b; box-shadow: 0 10px 28px rgba(0,0,0,.45); }
+        button { border-color: #474d57; } .save { background: #2f6fde; border-color: #2f6fde; }
+      }`;
+    const box = document.createElement("div");
+    box.className = "toast";
+    const make = (tag, className, text) => Object.assign(document.createElement(tag), { className, textContent: text });
+    const close = make("button", "close", "\u00d7");
+    const later = make("button", "later", "Not now");
+    const save = make("button", "save", pending.update ? "Update" : "Save");
+    const actions = make("div", "actions", "");
+    actions.append(later, save);
+    box.append(close, make("div", "title", pending.update ? "Update the saved password?" : "Save this password?"),
+      make("div", "who", `${pending.username || "No username"} \u00b7 ${location.hostname}`), actions);
+    root.append(style, box);
+    document.documentElement.append(host);
+    offer = { host, timer: null };
+    const away = (dismiss = true) => {
+      if (!offer || offer.host !== host) return;
+      clearTimeout(offer.timer);
+      box.style.opacity = "0";
+      setTimeout(() => host.remove(), 250);
+      offer = null;
+      if (dismiss) ask({ type: "dismiss" });
+    };
+    const soon = () => { clearTimeout(offer?.timer); if (offer) offer.timer = setTimeout(() => away(), OFFER_SHOWN); };
+    box.addEventListener("mouseenter", () => clearTimeout(offer?.timer));
+    box.addEventListener("mouseleave", soon);
+    close.addEventListener("click", (e) => e.isTrusted && away());
+    later.addEventListener("click", (e) => e.isTrusted && away());
+    save.addEventListener("click", async (e) => {
+      if (!e.isTrusted) return;
+      clearTimeout(offer?.timer);
+      save.disabled = later.disabled = true;
+      const got = await ask({ type: "save" });
+      actions.replaceChildren(make("div", "who", got?.saved ? "Saved to your vault" : "Couldn\u2019t save it"));
+      setTimeout(() => away(false), 1_800);
+    });
+    // Where the buttons are, for tests that press them as a person would.
+    requestAnimationFrame(() => {
+      const at = (el) => { const r = el.getBoundingClientRect(); return `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`; };
+      Object.assign(host.dataset, { save: at(save), later: at(later), close: at(close) });
+    });
+    soon();
+  }
+
+  document.addEventListener("submit", (e) => noticeLogin(e.target), true);
+  document.addEventListener("click", (e) => {
+    const button = e.target instanceof Element ? e.target.closest("button, input[type=submit]") : null;
+    if (button && !button.closest("herdr-autofill-save")) noticeLogin(button.form ?? button.closest("form") ?? document);
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target instanceof HTMLInputElement && e.target.type === "password") noticeLogin(e.target.form ?? document);
+  }, true);
+  checkOffer();
 
   // A site's passkey request, relayed from the page's world (webauthn.js); one at a time.
   let passkeyBusy = false;

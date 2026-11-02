@@ -220,48 +220,47 @@ mod native {
         ]),
     ];
     const AUTOFILL_HOST: &str = "dev.herdr.autofill";
-    const OLD_WORKERS_KEPT: usize = 5;
+
+    // Each version of an extension of Herdr's own gets a folder of its own. Chromium names an unpacked
+    // extension after its folder, so a new version arrives as a fresh install. Updating one in place
+    // made Chromium reload it at start, and a page asking its worker during that reload left the
+    // worker refused ("disallowed") for the whole session.
+    fn own_extension_folder(name: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let Some((_, files)) = OWN_EXTENSIONS.iter().find(|(folder, _)| *folder == name) else { return name.to_owned() };
+        let mut hash = Sha256::new();
+        files.iter().for_each(|(file, text)| {
+            hash.update(file.as_bytes());
+            hash.update(text.as_bytes());
+        });
+        let hash = hash.finalize();
+        format!("{name}-{:02x}{:02x}{:02x}{:02x}", hash[0], hash[1], hash[2], hash[3])
+    }
 
     fn write_own_extensions(cache: &std::path::Path) {
-        use sha2::{Digest, Sha256};
-        for (folder, files) in OWN_EXTENSIONS {
-            let folder = state_dir().join(folder);
-            let _ = std::fs::create_dir_all(&folder);
-            // Chromium keeps an extension's service worker until its version changes, so the version
-            // comes from the files themselves.
-            let mut hash = Sha256::new();
-            files.iter().for_each(|(_, text)| hash.update(text.as_bytes()));
-            let hash = hash.finalize();
-            let version = format!("1.{}.{}", u16::from_be_bytes([hash[0], hash[1]]), u16::from_be_bytes([hash[2], hash[3]]));
-            // It also keeps running a cached copy of the worker script, so the script's name changes too.
-            // The first session after a change can still restart the old one, so the last few stay.
-            let worker = format!("background-{:02x}{:02x}{:02x}{:02x}.js", hash[0], hash[1], hash[2], hash[3]);
-            if let Ok(old) = std::fs::read_dir(&folder) {
-                let mut workers: Vec<(std::time::SystemTime, PathBuf)> = old.flatten()
-                    .filter(|entry| { let name = entry.file_name().to_string_lossy().into_owned(); name.starts_with("background-") && name.ends_with(".js") && name != worker })
-                    .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
-                    .collect();
-                workers.sort();
-                for (_, path) in workers.iter().rev().skip(OLD_WORKERS_KEPT) {
-                    let _ = std::fs::remove_file(path);
+        for (name, files) in OWN_EXTENSIONS {
+            let current = own_extension_folder(name);
+            // Earlier versions' folders go: Chromium only loads the folders it's given.
+            if let Ok(entries) = std::fs::read_dir(state_dir()) {
+                for entry in entries.flatten() {
+                    let folder = entry.file_name().to_string_lossy().into_owned();
+                    let earlier = folder == *name || folder.strip_prefix(&format!("{name}-")).is_some_and(|rest| rest.len() == 8);
+                    if earlier && folder != current {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
                 }
             }
-            for (name, text) in files {
-                let text = if *name == "manifest.json" {
-                    text.replace("\"version\": \"1.0\"", &format!("\"version\": \"{version}\""))
-                        .replace("\"service_worker\": \"background.js\"", &format!("\"service_worker\": \"{worker}\""))
-                } else {
-                    (*text).to_owned()
-                };
-                let name = if *name == "background.js" { worker.as_str() } else { name };
-                let path = folder.join(name);
-                if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+            let folder = state_dir().join(&current);
+            let _ = std::fs::create_dir_all(&folder);
+            for (file, text) in files.iter() {
+                let path = folder.join(file);
+                if std::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
                     let _ = std::fs::write(&path, text);
                 }
             }
         }
         // Chromium starts the host beside the app's own executable, and only for the autofill extension.
-        let (Ok(exe), Some(id)) = (std::env::current_exe(), extension_id("autofill")) else { return };
+        let (Ok(exe), Some(id)) = (std::env::current_exe(), extension_id(&own_extension_folder("autofill"))) else { return };
         let manifest = serde_json::json!({
             "name": AUTOFILL_HOST,
             "description": "Herdr Autofill",
@@ -312,7 +311,13 @@ mod native {
                 switch("no-startup-window", None);
                 switch("hide-crash-restore-bubble", None);
                 switch("disable-features", Some(LEAN_FEATURES_OFF));
-                let folders: Vec<String> = ["ublock", "extensions-page", "autofill"].iter().map(|folder| state_dir().join(folder))
+                // HERDR_CHROMIUM_LOG=<vmodule spec> turns on Chromium's own logging, to stderr, for debugging.
+                if let Ok(modules) = std::env::var("HERDR_CHROMIUM_LOG") {
+                    switch("enable-logging", Some("stderr"));
+                    switch("vmodule", Some(&modules));
+                }
+                let folders: Vec<String> = ["ublock".to_owned(), own_extension_folder("extensions-page"), own_extension_folder("autofill")]
+                    .iter().map(|folder| state_dir().join(folder))
                     .filter(|folder| folder.join("manifest.json").exists())
                     .map(|folder| folder.to_string_lossy().into_owned()).collect();
                 if !folders.is_empty() {
@@ -1054,8 +1059,8 @@ mod native {
                 "forward" => browser.go_forward(),
                 "reload" => browser.reload(),
                 "ublock" | "extensions" => {
-                    let (folder, page) = if op == "ublock" { ("ublock", "dashboard.html") } else { ("extensions-page", "manage.html") };
-                    if let (Some(id), Some(frame)) = (extension_id(folder), browser.main_frame()) {
+                    let (folder, page) = if op == "ublock" { ("ublock".to_owned(), "dashboard.html") } else { (own_extension_folder("extensions-page"), "manage.html") };
+                    if let (Some(id), Some(frame)) = (extension_id(&folder), browser.main_frame()) {
                         frame.load_url(Some(&CefString::from(format!("chrome-extension://{id}/{page}").as_str())));
                     }
                 }

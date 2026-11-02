@@ -117,6 +117,43 @@ mod host {
                 confirm(&format!("fill your card {title}"))?;
                 Ok(json!({ "fields": vault(&["fields", title])?["fields"] }))
             }
+            // A login just typed: whether the vault has it already. Nothing secret goes back.
+            Some("known") => {
+                let (username, password) = (request["username"].as_str().unwrap_or_default(), request["password"].as_str().unwrap_or_default());
+                let Some(account) = accounts()?.into_iter().find(|account| account.username == username) else { return Ok(json!({})) };
+                let saved = vault(&["get", &account.title, "--field", "password"])?;
+                Ok(if saved["password"].as_str() == Some(password) { json!({ "same": true }) } else { json!({ "update": true }) })
+            }
+            // Saving what was typed, after a click on the page's offer: the account with this username
+            // gets the new password, or a new entry is made under the site's name.
+            Some("save") => {
+                let (username, password) = (request["username"].as_str().unwrap_or_default(), request["password"].as_str().unwrap_or_default());
+                if password.is_empty() {
+                    return Err("nothing to save".into());
+                }
+                let title = match accounts()?.into_iter().find(|account| account.username == username) {
+                    Some(account) => account.title,
+                    None => {
+                        let taken: Vec<String> = vault(&["list"])?["entries"].as_array().into_iter().flatten()
+                            .filter_map(|entry| entry["title"].as_str().map(str::to_ascii_lowercase)).collect();
+                        let named = if username.is_empty() { site.clone() } else { format!("{site} ({username})") };
+                        if taken.contains(&site.to_ascii_lowercase()) { named } else { site.clone() }
+                    }
+                };
+                let origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+                let mut args = vec!["put", title.as_str(), "--url", origin.as_str(), "--password-stdin"];
+                if !username.is_empty() {
+                    args.extend(["--username", username]);
+                }
+                let mut child = vault_command(&args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped()).spawn().map_err(|e| format!("can't run vault: {e}"))?;
+                child.stdin.take().ok_or("no stdin")?.write_all(password.as_bytes()).map_err(|e| format!("can't hand vault the password: {e}"))?;
+                let output = child.wait_with_output().map_err(|e| format!("vault failed: {e}"))?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("vault failed").to_owned());
+                }
+                Ok(json!({ "saved": title }))
+            }
             // A site asking for a passkey: the vault's, served into this page through the debug port.
             Some("passkey") => passkey(request, url),
             // A code from Messages needs no Touch ID: it's only filled into the field that asked.
