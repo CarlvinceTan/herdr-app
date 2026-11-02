@@ -202,24 +202,47 @@ mod native {
         }
     }
 
-    // Herdr's own extensions page is a small extension, since only an extension may manage the others
-    // (Chrome's page doesn't open in a pane). Written out at start, beside uBlock.
-    const EXTENSIONS_PAGE: [(&str, &str); 4] = [
-        ("manifest.json", include_str!("extensions-page/manifest.json")),
-        ("manage.html", include_str!("extensions-page/manage.html")),
-        ("manage.css", include_str!("extensions-page/manage.css")),
-        ("manage.js", include_str!("extensions-page/manage.js")),
+    // Herdr's own extensions, written out at start beside uBlock. The extensions page is one, since
+    // only an extension may manage the others (Chrome's page doesn't open in a pane). Autofill is the
+    // other: it fills from the user's vault through a native messaging host in the app.
+    const OWN_EXTENSIONS: [(&str, &[(&str, &str)]); 2] = [
+        ("extensions-page", &[
+            ("manifest.json", include_str!("extensions-page/manifest.json")),
+            ("manage.html", include_str!("extensions-page/manage.html")),
+            ("manage.css", include_str!("extensions-page/manage.css")),
+            ("manage.js", include_str!("extensions-page/manage.js")),
+        ]),
+        ("autofill", &[
+            ("manifest.json", include_str!("autofill/manifest.json")),
+            ("background.js", include_str!("autofill/background.js")),
+            ("content.js", include_str!("autofill/content.js")),
+        ]),
     ];
+    const AUTOFILL_HOST: &str = "dev.herdr.autofill";
 
-    fn write_extensions_page() {
-        let folder = state_dir().join("extensions-page");
-        let _ = std::fs::create_dir_all(&folder);
-        for (name, text) in EXTENSIONS_PAGE {
-            let path = folder.join(name);
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
-                let _ = std::fs::write(&path, text);
+    fn write_own_extensions(cache: &std::path::Path) {
+        for (folder, files) in OWN_EXTENSIONS {
+            let folder = state_dir().join(folder);
+            let _ = std::fs::create_dir_all(&folder);
+            for (name, text) in files {
+                let path = folder.join(name);
+                if std::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
+                    let _ = std::fs::write(&path, text);
+                }
             }
         }
+        // Chromium starts the host beside the app's own executable, and only for the autofill extension.
+        let (Ok(exe), Some(id)) = (std::env::current_exe(), extension_id("autofill")) else { return };
+        let manifest = serde_json::json!({
+            "name": AUTOFILL_HOST,
+            "description": "Herdr Autofill",
+            "path": exe.with_file_name("herdr-autofill-host"),
+            "type": "stdio",
+            "allowed_origins": [format!("chrome-extension://{id}/")],
+        });
+        let hosts = cache.join("NativeMessagingHosts");
+        let _ = std::fs::create_dir_all(&hosts);
+        let _ = std::fs::write(hosts.join(format!("{AUTOFILL_HOST}.json")), manifest.to_string());
     }
 
     // Chromium names an extension loaded from a folder after that folder's real path.
@@ -260,7 +283,7 @@ mod native {
                 switch("no-startup-window", None);
                 switch("hide-crash-restore-bubble", None);
                 switch("disable-features", Some(LEAN_FEATURES_OFF));
-                let folders: Vec<String> = ["ublock", "extensions-page"].iter().map(|folder| state_dir().join(folder))
+                let folders: Vec<String> = ["ublock", "extensions-page", "autofill"].iter().map(|folder| state_dir().join(folder))
                     .filter(|folder| folder.join("manifest.json").exists())
                     .map(|folder| folder.to_string_lossy().into_owned()).collect();
                 if !folders.is_empty() {
@@ -351,7 +374,7 @@ mod native {
             let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
             let cache = state_dir().join("cef");
             seed_default_zoom(&cache);
-            write_extensions_page();
+            write_own_extensions(&cache);
             let cache = CefString::from(cache.to_string_lossy().as_ref());
             let settings = Settings {
                 no_sandbox: 1,
