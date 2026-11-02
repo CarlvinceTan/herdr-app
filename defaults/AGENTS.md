@@ -588,6 +588,13 @@ The main ones:
   Other unreachable machines don't offer this.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`.
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
+- Web pages (macOS, this fork's Chromium): a mod draws one with `WebView.new(id)`;
+  `web.do {id, op, arg?}` drives it (op: `navigate` with an address or a search,
+  `back`, `forward`, `reload`, `zoom` with `in`/`out`/`reset`, `clear-data`,
+  `hole` with `"x y w h"` to let clicks through, `show`, `hide`, `remove`).
+  `web.report` publishes each page's `{url, title, asked, shown}` to the shared
+  `web.pages`; `web.clicked {id}` is what a press on a page sends, and focuses
+  the pane that holds it.
 
 When the user runs a command without a required name (a key, a click), Herdr
 asks them. **You never get a dialog**: pass every required argument, or the
@@ -682,6 +689,9 @@ What's about the user, never a look:
   background; this is a threshold, not a guaranteed resulting ratio.
   Box/block, Powerline and sprite glyph colors are never adjusted.
   Changes apply immediately, including text already on screen.
+- `browser_debug_port`: the port Chrome's DevTools protocol listens on for web
+  pages, so agents on this computer can drive them (default `9333`; `0` closes
+  it). Read at launch.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,

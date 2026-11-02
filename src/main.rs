@@ -74,6 +74,16 @@ fn attach_console() {
     }
 }
 
+/// For agents to drive browser panes: `browser_debug_port` in settings.json, and 0 turns it off.
+const BROWSER_DEBUG_PORT: i64 = 9333;
+
+fn browser_debug_port() -> i32 {
+    std::fs::read_to_string(mods::app_dir().join("settings.json")).ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|settings| settings.get("browser_debug_port")?.as_i64())
+        .unwrap_or(BROWSER_DEBUG_PORT) as i32
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(windows)]
@@ -116,6 +126,9 @@ fn main() {
         return;
     }
 
+    // Ahead of everything that starts a thread.
+    gpui_shell::web_view::start(browser_debug_port());
+
     telemetry::clock();
     // A first start sizes the app to the screen and the system's text size.
     let fresh = !settings::path().exists();
@@ -148,8 +161,6 @@ fn main() {
         eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());
     }
 
-    // Chromium has to be up before the app's event loop runs.
-    gpui_shell::web_view::start();
     gpui_platform::application()
         .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
         .run(move |cx| {

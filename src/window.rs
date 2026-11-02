@@ -2642,7 +2642,7 @@ impl AppWindow {
             }
             "web.report" => {
                 let pages = gpui_shell::web_view::pages().into_iter()
-                    .map(|(id, url, title, asked)| (id, json!({ "url": url, "title": title, "asked": asked })))
+                    .map(|(id, url, title, asked, shown)| (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown })))
                     .collect::<serde_json::Map<String, Value>>();
                 let pages = Value::Object(pages);
                 if crate::mods::shared("web.pages").as_ref() != Some(&pages) {

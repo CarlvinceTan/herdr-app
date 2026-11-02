@@ -98,6 +98,11 @@ extern "C" fn set_handling_send_event(this: &mut Object, _: Sel, handling: BOOL)
     unsafe { this.set_ivar("handlingSendEvent", handling) }
 }
 
+// Work to do as the app quits, ahead of GPUI's own shutdown, while the app's state is free to use.
+extern "C" fn set_before_terminate(this: &mut Object, _: Sel, work: *mut c_void) {
+    unsafe { this.set_ivar("beforeTerminate", work) }
+}
+
 extern "C" fn send_event(this: &mut Object, _: Sel, event: id) {
     unsafe {
         let was: BOOL = *this.get_ivar("handlingSendEvent");
@@ -118,6 +123,8 @@ unsafe fn build_classes() {
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
             // HERDR: Chromium needs its application to say when it's dispatching an event.
             decl.add_ivar::<BOOL>("handlingSendEvent");
+            decl.add_ivar::<*mut c_void>("beforeTerminate");
+            decl.add_method(sel!(setBeforeTerminate:), set_before_terminate as extern "C" fn(&mut Object, Sel, *mut c_void));
             decl.add_method(sel!(isHandlingSendEvent), is_handling_send_event as extern "C" fn(&Object, Sel) -> BOOL);
             decl.add_method(sel!(setHandlingSendEvent:), set_handling_send_event as extern "C" fn(&mut Object, Sel, BOOL));
             decl.add_method(sel!(sendEvent:), send_event as extern "C" fn(&mut Object, Sel, id));
@@ -1508,6 +1515,13 @@ extern "C" fn should_handle_reopen(this: &mut Object, _: Sel, _: id, has_open_wi
 }
 
 extern "C" fn will_terminate(this: &mut Object, _: Sel, _: id) {
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let work: *mut c_void = *(*app).get_ivar("beforeTerminate");
+        if !work.is_null() {
+            std::mem::transmute::<*mut c_void, extern "C" fn()>(work)();
+        }
+    }
     let platform = unsafe { get_mac_platform(this) };
     let mut lock = platform.0.lock();
     if let Some(mut callback) = lock.quit.take() {

@@ -19,6 +19,9 @@ cat <<PLIST
 <key>CFBundleExecutable</key><string>$1</string>
 <key>CFBundleIdentifier</key><string>$2</string>
 <key>CFBundleName</key><string>$1</string>
+<key>CFBundleDisplayName</key><string>$1</string>
+<key>CFBundleVersion</key><string>0.1.11</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.11</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -27,7 +30,8 @@ $3
 PLIST
 }
 
-plist Herdr dev.herdr.app.fork "" > "$app/Contents/Info.plist"
+plist Herdr dev.herdr.app.fork "<key>CFBundleIconFile</key><string>Herdr</string>" > "$app/Contents/Info.plist"
+cp /Applications/Herdr.app/Contents/Resources/Herdr.icns "$app/Contents/Resources/" 2>/dev/null || true
 for suffix in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
   name="Herdr Helper$suffix"
   helper="$app/Contents/Frameworks/$name.app"
@@ -35,4 +39,9 @@ for suffix in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
   cp "$root/target/$profile/herdr-cef-helper" "$helper/Contents/MacOS/$name"
   plist "$name" "dev.herdr.app.fork.helper$(echo "$suffix" | tr -d ' ()' | tr '[:upper:]' '[:lower:]')" "<key>LSUIElement</key><true/>" > "$helper/Contents/Info.plist"
 done
+# Signed for this computer, helpers before the app that holds them. Herdr's script engine needs JIT.
+sign() { codesign --force --sign - --entitlements "$root/scripts/macos-entitlements.plist" --timestamp=none "$1"; }
+for helper in "$app/Contents/Frameworks"/*.app; do sign "$helper"; done
+codesign --force --sign - --timestamp=none "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+sign "$app"
 echo "$app"

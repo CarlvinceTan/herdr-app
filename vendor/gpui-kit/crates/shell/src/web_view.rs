@@ -59,8 +59,8 @@ mod native {
     pub fn place(_: &Window, _: &str, _: Bounds<Pixels>, _: &mut App) {}
     pub fn command(_: &str, _: &str, _: &str) {}
     pub fn on_click(_: impl Fn(String) + 'static) {}
-    pub fn start() -> bool { false }
-    pub fn pages() -> Vec<(String, String, String, u64)> { Vec::new() }
+    pub fn start(_: i32) -> bool { false }
+    pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
     pub fn set_suspended(_: bool) {}
 }
 
@@ -75,11 +75,11 @@ mod native {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use cef::{
-        App, Browser, BrowserSettings, CefString, Client, CommandLine, DictionaryValue, DisplayHandler,
-        Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplClient, ImplCommandLine, ImplDisplayHandler, ImplFrame,
+        App, Browser, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
+        Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplClient, ImplCommandLine, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, LifeSpanHandler, PopupFeatures, Rect as CefRect, RuntimeStyle, Settings,
-        WindowInfo, WindowOpenDisposition, WrapApp, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler,
-        rc::Rc as _, wrap_app, wrap_client, wrap_display_handler, wrap_life_span_handler,
+        WindowInfo, WindowOpenDisposition, WrapApp, WrapClient, WrapLifeSpanHandler,
+        rc::Rc as _, wrap_app, wrap_client, wrap_life_span_handler,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
     use objc::declare::ClassDecl;
@@ -133,8 +133,6 @@ mod native {
     const SHIFT_KEY: u64 = 1 << 17;
     const WIDTH_AND_HEIGHT: u64 = 2 | 16;
     const BOTTOM_LEFT_AND_RIGHT: u64 = 1 | 2;
-    // For agents: Chrome's DevTools protocol, on this computer only.
-    const DEBUG_PORT: i32 = 9333;
     const PUMP_EVERY: Duration = Duration::from_millis(8);
     // Chrome counts zoom in powers of this.
     const ZOOM_BASE: f64 = 1.2;
@@ -150,8 +148,6 @@ mod native {
         top: f64,
         left: f64,
         asked: u64,
-        // A page asked for before its browser exists.
-        pending: Option<String>,
     }
 
     thread_local! {
@@ -162,10 +158,14 @@ mod native {
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static PUMPING: Cell<bool> = const { Cell::new(false) };
+        // Addresses sent before their page's view has drawn.
+        static WAITING: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     }
 
     fn state_dir() -> PathBuf {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/herdr-browser")
+        std::env::var("XDG_STATE_HOME").map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"))
+            .join("herdr-browser")
     }
 
     fn zoom_level(factor: f64) -> f64 {
@@ -180,6 +180,9 @@ mod native {
             fn on_before_command_line_processing(&self, process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
                 let is_browser = process_type.is_none_or(|kind| kind.to_string().is_empty());
                 let (true, Some(line)) = (is_browser, command_line) else { return };
+                // Pages can't post to macOS here, so its notifications helper would sit idle.
+                line.append_switch(Some(&CefString::from("disable-notifications")));
+                line.append_switch_with_value(Some(&CefString::from("disable-features")), Some(&CefString::from("NativeNotifications,SystemNotifications")));
                 let ublock = state_dir().join("ublock");
                 if ublock.join("manifest.json").exists() {
                     let path = CefString::from(ublock.to_string_lossy().as_ref());
@@ -191,47 +194,11 @@ mod native {
     }
 
     wrap_client! {
-        struct PageClient {
-            id: String,
-        }
+        struct PageClient;
 
         impl Client {
-            fn display_handler(&self) -> Option<DisplayHandler> {
-                Some(PageDisplay::new(self.id.clone()))
-            }
-
             fn life_span_handler(&self) -> Option<LifeSpanHandler> {
                 Some(PagePopups::new())
-            }
-        }
-    }
-
-    wrap_display_handler! {
-        struct PageDisplay {
-            id: String,
-        }
-
-        impl DisplayHandler {
-            fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
-                if frame.is_none_or(|frame| frame.is_main() == 0) {
-                    return;
-                }
-                let url = url.map(CefString::to_string).unwrap_or_default();
-                VIEWS.with_borrow_mut(|views| {
-                    if let Some(view) = views.get_mut(&self.id) {
-                        view.url = url;
-                        apply_zoom(view);
-                    }
-                });
-            }
-
-            fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
-                let title = title.map(CefString::to_string).unwrap_or_default();
-                VIEWS.with_borrow_mut(|views| {
-                    if let Some(view) = views.get_mut(&self.id) {
-                        view.title = title;
-                    }
-                });
             }
         }
     }
@@ -266,8 +233,11 @@ mod native {
         }
     }
 
-    /// Starts CEF. Chromium has to be up before the app's event loop runs.
-    pub fn start() -> bool {
+    /// Starts CEF, as early in a launch as can be. Its message pump counts the run loop's passes and
+    /// crashes leaving one it never saw begin, and it takes over malloc for the whole process, which
+    /// isn't safe once other threads run. `debug_port` opens Chrome's DevTools protocol to programs on
+    /// this computer, for agents; 0 leaves it closed.
+    pub fn start(debug_port: i32) -> bool {
         if STARTED.get() {
             return true;
         }
@@ -275,6 +245,11 @@ mod native {
             // Chromium needs to find the app it can talk to, not a plain one it would make itself.
             let _: Id = unsafe { msg_send![class!(GPUIApplication), sharedApplication] };
             let Ok(exe) = std::env::current_exe() else { return false };
+            let framework = exe.parent().and_then(|dir| dir.parent()).map(|contents| contents.join("Frameworks/Chromium Embedded Framework.framework"));
+            if !framework.is_some_and(|framework| framework.exists()) {
+                tracing::warn!("web view: this build wasn't bundled with Chromium");
+                return false;
+            }
             let loader = cef::library_loader::LibraryLoader::new(&exe, false);
             if !loader.load() {
                 tracing::error!("web view: no Chromium Embedded Framework beside {exe:?}");
@@ -288,7 +263,7 @@ mod native {
                 no_sandbox: 1,
                 external_message_pump: 1,
                 persist_session_cookies: 1,
-                remote_debugging_port: DEBUG_PORT,
+                remote_debugging_port: debug_port,
                 root_cache_path: cache.clone(),
                 cache_path: cache,
                 ..Default::default()
@@ -300,6 +275,10 @@ mod native {
                 return false;
             }
             STARTED.set(true);
+            unsafe {
+                let app: Id = msg_send![class!(NSApplication), sharedApplication];
+                let _: () = msg_send![app, setBeforeTerminate: finish as extern "C" fn() as *mut c_void];
+            }
             true
         }
     }
@@ -313,7 +292,9 @@ mod native {
         cx.foreground_executor().spawn(async move {
             loop {
                 timer.timer(PUMP_EVERY).await;
-                cef::do_message_loop_work();
+                if STARTED.get() {
+                    cef::do_message_loop_work();
+                }
             }
         }).detach();
     }
@@ -449,13 +430,13 @@ mod native {
         }
     }
 
-    fn create_browser(id: &str, host: Id, width: i32, height: i32) -> Option<Browser> {
+    fn create_browser(host: Id, url: &str, width: i32, height: i32) -> Option<Browser> {
         let bounds = CefRect { x: 0, y: 0, width, height };
         let info = WindowInfo { runtime_style: RuntimeStyle::ALLOY, ..Default::default() }
             .set_as_child(host as cef::sys::cef_window_handle_t, &bounds);
-        let mut client = PageClient::new(id.to_owned());
+        let mut client = PageClient::new();
         let browser = cef::browser_host_create_browser_sync(
-            Some(&info), Some(&mut client), Some(&CefString::from("about:blank")),
+            Some(&info), Some(&mut client), Some(&CefString::from(url)),
             Some(&BrowserSettings::default()), None, None,
         )?;
         if let Some(browser_host) = browser.host() {
@@ -471,6 +452,35 @@ mod native {
         if let Some(host) = view.browser.as_ref().and_then(|browser| browser.host()) {
             host.set_zoom_level(zoom_level(view.zoom));
         }
+    }
+
+    // A closing page takes the window it's in along with it, so it leaves the app's window first. It
+    // only finishes closing once its own view is released, which leaving the host does.
+    fn close_page(view: &View) {
+        unsafe {
+            let _: () = msg_send![view.host, removeFromSuperview];
+        }
+        if let Some(host) = view.browser.as_ref().and_then(|browser| browser.host()) {
+            host.close_browser(1);
+        }
+        unsafe {
+            // Reading the list holds its views until this pool ends, and at quit nothing else would.
+            let pool: Id = msg_send![class!(NSAutoreleasePool), new];
+            let pages: Id = msg_send![view.host, subviews];
+            let count: usize = msg_send![pages, count];
+            for i in 0..count {
+                let page: Id = msg_send![pages, objectAtIndex: i];
+                let _: () = msg_send![page, removeFromSuperview];
+            }
+            let _: () = msg_send![pool, drain];
+        }
+    }
+
+    // Closes every page and lets Chromium write what it holds, so a sign-in just before quitting stays.
+    extern "C" fn finish() {
+        STARTED.set(false);
+        VIEWS.take().values().for_each(close_page);
+        cef::shutdown();
     }
 
     pub fn place(window: &Window, id: &str, bounds: Bounds<Pixels>, cx: &mut GpuiApp) {
@@ -499,7 +509,6 @@ mod native {
                 top: 0.0,
                 left: 0.0,
                 asked: 0,
-                pending: None,
             });
             view.top = top;
             view.left = left;
@@ -511,14 +520,12 @@ mod native {
         });
         // Creating a browser runs the message loop, which reaches back into VIEWS.
         if let Some(host) = created {
-            let browser = create_browser(id, host, width as i32, height as i32);
+            let url = WAITING.with_borrow_mut(|waiting| waiting.remove(id)).unwrap_or_else(|| "about:blank".to_owned());
+            let browser = create_browser(host, &url, width as i32, height as i32);
             VIEWS.with_borrow_mut(|views| {
                 if let Some(view) = views.get_mut(id) {
                     view.browser = browser;
                     apply_zoom(view);
-                    if let (Some(url), Some(frame)) = (view.pending.take(), view.browser.as_ref().and_then(|b| b.main_frame())) {
-                        frame.load_url(Some(&CefString::from(url.as_str())));
-                    }
                 }
             });
         }
@@ -548,10 +555,26 @@ mod native {
         CLICK.with_borrow_mut(|click| *click = Some(Box::new(callback)));
     }
 
-    /// Each page's id, address, title and when it last asked for the address bar.
-    pub fn pages() -> Vec<(String, String, String, u64)> {
-        VIEWS.with_borrow(|views| {
-            views.iter().map(|(id, view)| (id.clone(), view.url.clone(), view.title.clone(), view.asked)).collect()
+    // A browser's own record of what's on show. Its display callbacks don't arrive for a page in a
+    // view parented like this. Zoom goes with the site, so a new address gets it again.
+    fn refresh(view: &mut View) {
+        let Some(entry) = view.browser.as_ref().and_then(|browser| browser.host()).and_then(|host| host.visible_navigation_entry()) else { return };
+        let url = CefString::from(&entry.url()).to_string();
+        view.title = CefString::from(&entry.title()).to_string();
+        if url != view.url {
+            view.url = url;
+            apply_zoom(view);
+        }
+    }
+
+    /// Each page's id, address, title, when it last asked for the address bar, and if it's on show.
+    pub fn pages() -> Vec<(String, String, String, u64, bool)> {
+        let suspended = SUSPENDED.get();
+        VIEWS.with_borrow_mut(|views| {
+            views.iter_mut().map(|(id, view)| {
+                refresh(view);
+                (id.clone(), view.url.clone(), view.title.clone(), view.asked, view.shown && !suspended)
+            }).collect()
         })
     }
 
@@ -630,13 +653,13 @@ mod native {
     pub fn command(id: &str, op: &str, arg: &str) {
         if op == "remove" {
             if let Some(view) = VIEWS.with_borrow_mut(|views| views.remove(id)) {
-                if let Some(host) = view.browser.as_ref().and_then(|browser| browser.host()) {
-                    host.close_browser(1);
-                }
-                unsafe {
-                    let _: () = msg_send![view.host, removeFromSuperview];
-                }
+                close_page(&view);
             }
+            return;
+        }
+        let exists = VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.browser.is_some()));
+        if op == "navigate" && !exists {
+            WAITING.with_borrow_mut(|waiting| waiting.insert(id.to_owned(), normalize(arg)));
             return;
         }
         let browser = VIEWS.with_borrow_mut(|views| {
@@ -647,7 +670,6 @@ mod native {
                 "hole" => unsafe { set_hole(view, arg) },
                 "show" => view.shown = true,
                 "hide" => view.shown = false,
-                "navigate" if view.browser.is_none() => view.pending = Some(normalize(arg)),
                 _ => {}
             }
             view.browser.clone()
