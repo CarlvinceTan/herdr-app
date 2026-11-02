@@ -77,7 +77,7 @@ mod native {
 
     use cef::{
         App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
-        Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplFrame, ImplNavigationEntry,
+        Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, LifeSpanHandler, PopupFeatures, Rect as CefRect, RuntimeStyle, Settings,
         WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler,
         rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler,
@@ -136,6 +136,7 @@ mod native {
     const BOTTOM_LEFT_AND_RIGHT: u64 = 1 | 2;
     const PUMP_AT_LEAST_EVERY: Duration = Duration::from_millis(250);
     const SEAL_EVERY: Duration = Duration::from_secs(1);
+    const CHROME_WINDOWS_CLOSE: Duration = Duration::from_millis(1000);
     const DEBUG_PORT_WAIT: Duration = Duration::from_millis(500);
     const LEAN_FEATURES_OFF: &str = "NativeNotifications,SystemNotifications,SpareRendererForSitePerProcess,MediaRouter,\
         DialMediaRouteProvider,OptimizationHints,OptimizationGuideModelDownloading,Translate";
@@ -201,10 +202,30 @@ mod native {
         }
     }
 
+    // Herdr's own extensions page is a small extension, since only an extension may manage the others
+    // (Chrome's page doesn't open in a pane). Written out at start, beside uBlock.
+    const EXTENSIONS_PAGE: [(&str, &str); 4] = [
+        ("manifest.json", include_str!("extensions-page/manifest.json")),
+        ("manage.html", include_str!("extensions-page/manage.html")),
+        ("manage.css", include_str!("extensions-page/manage.css")),
+        ("manage.js", include_str!("extensions-page/manage.js")),
+    ];
+
+    fn write_extensions_page() {
+        let folder = state_dir().join("extensions-page");
+        let _ = std::fs::create_dir_all(&folder);
+        for (name, text) in EXTENSIONS_PAGE {
+            let path = folder.join(name);
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+    }
+
     // Chromium names an extension loaded from a folder after that folder's real path.
-    fn ublock_id() -> Option<String> {
+    fn extension_id(folder: &str) -> Option<String> {
         use sha2::{Digest, Sha256};
-        let path = std::fs::canonicalize(state_dir().join("ublock")).ok()?;
+        let path = std::fs::canonicalize(state_dir().join(folder)).ok()?;
         let hash = Sha256::digest(path.to_string_lossy().as_bytes());
         Some(hash[..16].iter().flat_map(|byte| [byte >> 4, byte & 15]).map(|n| (b'a' + n) as char).collect())
     }
@@ -239,10 +260,11 @@ mod native {
                 switch("no-startup-window", None);
                 switch("hide-crash-restore-bubble", None);
                 switch("disable-features", Some(LEAN_FEATURES_OFF));
-                let ublock = state_dir().join("ublock");
-                if ublock.join("manifest.json").exists() {
-                    let path = CefString::from(ublock.to_string_lossy().as_ref());
-                    line.append_switch_with_value(Some(&CefString::from("load-extension")), Some(&path));
+                let folders: Vec<String> = ["ublock", "extensions-page"].iter().map(|folder| state_dir().join(folder))
+                    .filter(|folder| folder.join("manifest.json").exists())
+                    .map(|folder| folder.to_string_lossy().into_owned()).collect();
+                if !folders.is_empty() {
+                    switch("load-extension", Some(&folders.join(",")));
                 }
             }
         }
@@ -329,6 +351,7 @@ mod native {
             let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
             let cache = state_dir().join("cef");
             seed_default_zoom(&cache);
+            write_extensions_page();
             let cache = CefString::from(cache.to_string_lossy().as_ref());
             let settings = Settings {
                 no_sandbox: 1,
@@ -415,6 +438,7 @@ mod native {
         if !STARTED.get() {
             return;
         }
+        settle_chrome_dialogs();
         if LAST_SEAL.get().is_none_or(|at| at.elapsed() >= SEAL_EVERY) {
             LAST_SEAL.set(Some(Instant::now()));
             seal_fds();
@@ -564,14 +588,6 @@ mod native {
         }
     }
 
-    // Chrome's own pages for extensions (managing them, the Web Store's install prompt) need its full
-    // UI, which a page in a pane doesn't have. They open in a Chrome window on the same profile.
-    fn open_chrome_window(url: &str) {
-        let info = WindowInfo { runtime_style: RuntimeStyle::CHROME, ..Default::default() };
-        let mut client = PageClient::new();
-        cef::browser_host_create_browser(Some(&info), Some(&mut client), Some(&CefString::from(url)), Some(&BrowserSettings::default()), None, None);
-    }
-
     fn create_browser(host: Id, url: &str, width: i32, height: i32) -> Option<Browser> {
         let bounds = CefRect { x: 0, y: 0, width, height };
         let info = WindowInfo { runtime_style: RuntimeStyle::ALLOY, ..Default::default() }
@@ -621,8 +637,85 @@ mod native {
     // Closes every page and lets Chromium write what it holds, so a sign-in just before quitting stays.
     extern "C" fn finish() {
         STARTED.set(false);
+        if let Some(cookies) = cef::cookie_manager_get_global_manager(None) {
+            cookies.flush_store(None);
+        }
+        // Chromium's own windows (an extension's install prompt) have to go first: its shutdown
+        // crashes with one open. They close through the run loop, which nothing turns during a quit.
+        for window in chrome_windows() {
+            unsafe {
+                let _: () = msg_send![window, close];
+            }
+        }
         VIEWS.take().values().for_each(close_page);
-        cef::shutdown();
+        let deadline = Instant::now() + CHROME_WINDOWS_CLOSE;
+        while !chrome_windows().is_empty() && Instant::now() < deadline {
+            cef::do_message_loop_work();
+            unsafe {
+                let pool: Id = msg_send![class!(NSAutoreleasePool), new];
+                let until: Id = msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: 0.01f64];
+                let run_loop: Id = msg_send![class!(NSRunLoop), currentRunLoop];
+                let _: BOOL = msg_send![run_loop, runMode: ns_string("kCFRunLoopDefaultMode") beforeDate: until];
+                let _: () = msg_send![pool, drain];
+            }
+        }
+        // Better to skip Chromium's shutdown than crash in it; the cookies are already written.
+        if chrome_windows().is_empty() {
+            cef::shutdown();
+        } else {
+            tracing::warn!("web view: a Chromium window wouldn't close; quitting without its shutdown");
+        }
+    }
+
+    // Chromium's own dialogs (an extension's install prompt) come as loose windows whose title bar
+    // covers their heading. Each gets a clear title bar and sits centred on Herdr's window, attached
+    // to it. Only titled windows: a page's dropdowns and pickers are untitled and stay where they are.
+    fn settle_chrome_dialogs() {
+        let gpui = GPUI_VIEW.get();
+        if gpui.is_null() {
+            return;
+        }
+        const TITLED: u64 = 1;
+        const TITLE_HIDDEN: i64 = 1;
+        const ABOVE: i64 = 1;
+        unsafe {
+            let main: Id = msg_send![gpui, window];
+            if main.is_null() {
+                return;
+            }
+            for window in chrome_windows() {
+                let style: u64 = msg_send![window, styleMask];
+                let parent: Id = msg_send![window, parentWindow];
+                if style & TITLED == 0 || parent == main {
+                    continue;
+                }
+                let _: () = msg_send![window, setTitlebarAppearsTransparent: YES];
+                let _: () = msg_send![window, setTitleVisibility: TITLE_HIDDEN];
+                let area: NsRect = msg_send![main, frame];
+                let frame: NsRect = msg_send![window, frame];
+                let origin = Point {
+                    x: area.origin.x + (area.size.w - frame.size.w) / 2.0,
+                    y: area.origin.y + (area.size.h - frame.size.h) / 2.0,
+                };
+                let _: () = msg_send![window, setFrameOrigin: origin];
+                let _: () = msg_send![main, addChildWindow: window ordered: ABOVE];
+            }
+        }
+    }
+
+    // The app's windows that Chromium opened itself (views widgets), not Herdr's own.
+    fn chrome_windows() -> Vec<Id> {
+        unsafe {
+            let app: Id = msg_send![class!(NSApplication), sharedApplication];
+            let windows: Id = msg_send![app, windows];
+            let count: usize = msg_send![windows, count];
+            (0..count).filter_map(|i| {
+                let window: Id = msg_send![windows, objectAtIndex: i];
+                let visible: BOOL = msg_send![window, isVisible];
+                let class: Id = msg_send![window, className];
+                (visible == YES && rust_string(class).starts_with("NativeWidget")).then_some(window)
+            }).collect()
+        }
     }
 
     pub fn place(window: &Window, id: &str, bounds: Bounds<Pixels>, _cx: &mut GpuiApp) {
@@ -865,7 +958,6 @@ mod native {
     pub fn command(id: &str, op: &str, arg: &str) {
         match op {
             "blur" => return take_keys_back(),
-            "extensions" => return open_chrome_window("chrome://extensions"),
             "focus" => return give_keys(id),
             // A popup over the page (its address, its menu) takes the keyboard while it's open.
             "hole" if arg.split_whitespace().count() == 4 => {
@@ -909,9 +1001,10 @@ mod native {
                 "back" => browser.go_back(),
                 "forward" => browser.go_forward(),
                 "reload" => browser.reload(),
-                "ublock" => {
-                    if let (Some(id), Some(frame)) = (ublock_id(), browser.main_frame()) {
-                        frame.load_url(Some(&CefString::from(format!("chrome-extension://{id}/dashboard.html").as_str())));
+                "ublock" | "extensions" => {
+                    let (folder, page) = if op == "ublock" { ("ublock", "dashboard.html") } else { ("extensions-page", "manage.html") };
+                    if let (Some(id), Some(frame)) = (extension_id(folder), browser.main_frame()) {
+                        frame.load_url(Some(&CefString::from(format!("chrome-extension://{id}/{page}").as_str())));
                     }
                 }
                 "hole" => {

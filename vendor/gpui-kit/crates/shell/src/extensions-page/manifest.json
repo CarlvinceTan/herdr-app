@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "name": "Herdr Extensions",
+  "version": "1.0",
+  "description": "The page in Herdr's browser panes for managing extensions.",
+  "permissions": ["management"]
+}

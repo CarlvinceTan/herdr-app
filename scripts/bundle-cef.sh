@@ -1,7 +1,8 @@
 #!/bin/sh
 # Packages a dev build as an app with CEF inside. CEF only runs from a bundle: its framework and
 # helper apps are found by their place in one, and helpers by the main executable's name. Usage: scripts/bundle-cef.sh [debug|release]
-# HERDR_BUNDLE_ID (default dev.herdr.app.fork, the test copy) and HERDR_BUNDLE_DIR (default target/bundle).
+# HERDR_BUNDLE_ID (default dev.herdr.app.fork, the test copy), HERDR_BUNDLE_DIR (default target/bundle),
+# HERDR_SIGN_IDENTITY (default "-": signed for this computer only).
 set -eu
 profile=${1:-debug}
 cef=${CEF_PATH:-$HOME/.local/share/cef}
@@ -50,9 +51,11 @@ for suffix in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
   plist "$name" "$id.helper$(echo "$suffix" | tr -d ' ()' | tr '[:upper:]' '[:lower:]')" "<key>LSUIElement</key><true/>
 $usage" > "$helper/Contents/Info.plist"
 done
-# Signed for this computer, helpers before the app that holds them. Herdr's script engine needs JIT.
-sign() { codesign --force --sign - --entitlements "$root/scripts/macos-entitlements.plist" --timestamp=none "$1"; }
+# Helpers before the app that holds them. Herdr's script engine needs JIT. With a real identity,
+# macOS keeps the permissions it gave the app (Bluetooth, microphone) across updates.
+identity=${HERDR_SIGN_IDENTITY:--}
+sign() { codesign --force --sign "$identity" --entitlements "$root/scripts/macos-entitlements.plist" --timestamp=none "$1"; }
 for helper in "$app/Contents/Frameworks"/*.app; do sign "$helper"; done
-codesign --force --sign - --timestamp=none "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+codesign --force --sign "$identity" --timestamp=none "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
 sign "$app"
 echo "$app"

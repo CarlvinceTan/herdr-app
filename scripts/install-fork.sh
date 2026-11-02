@@ -8,6 +8,9 @@ export CEF_PATH=${CEF_PATH:-$HOME/.local/share/cef} ZIG=${ZIG:-$HOME/.local/shar
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 cd "$root"
+# Which certificate signs it: HERDR_SIGN_IDENTITY, or the one named in .herdr-sign-identity (kept out
+# of git), or none ("-", this computer only, and macOS forgets its permissions on each update).
+export HERDR_SIGN_IDENTITY=${HERDR_SIGN_IDENTITY:-$(cat "$root/.herdr-sign-identity" 2>/dev/null || echo -)}
 cargo build --release
 HERDR_BUNDLE_ID=dev.herdr.app HERDR_BUNDLE_DIR="$root/target/install" scripts/bundle-cef.sh release
 codesign --verify --deep --strict "$root/target/install/Herdr.app"
