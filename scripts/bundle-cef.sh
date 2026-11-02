@@ -14,6 +14,10 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
 cp "$root/target/$profile/herdr-app" "$app/Contents/MacOS/Herdr"
 cp "$root/target/$profile/herdr-autofill-host" "$app/Contents/MacOS/"
+# The vault CLI autofill runs (vault/), built here as it's a package of its own.
+if [ "$profile" = release ]; then vault_flag=--release; else vault_flag=; fi
+cargo build $vault_flag --quiet --manifest-path "$root/vault/Cargo.toml" --target-dir "$root/target/vault"
+cp "$root/target/vault/$profile/vault" "$app/Contents/MacOS/"
 cp -R "$cef/Chromium Embedded Framework.framework" "$app/Contents/Frameworks/"
 
 plist() { # executable, identifier
@@ -58,6 +62,7 @@ identity=${HERDR_SIGN_IDENTITY:--}
 sign() { codesign --force --sign "$identity" --entitlements "$root/scripts/macos-entitlements.plist" --timestamp=none "$1"; }
 for helper in "$app/Contents/Frameworks"/*.app; do sign "$helper"; done
 codesign --force --sign "$identity" --timestamp=none "$app/Contents/MacOS/herdr-autofill-host"
+codesign --force --sign "$identity" --timestamp=none "$app/Contents/MacOS/vault"
 codesign --force --sign "$identity" --timestamp=none "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
 sign "$app"
 echo "$app"

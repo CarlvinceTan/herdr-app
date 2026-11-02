@@ -412,7 +412,8 @@
       clearTimeout(offer?.timer);
       save.disabled = later.disabled = true;
       const got = await ask({ type: "save", username: user.value.trim(), password: pass.value });
-      actions.replaceChildren(make("div", { className: "note", textContent: got?.saved ? "Saved to your vault" : "Couldn\u2019t save it" }));
+      const note = got?.saved ? (got.created ? "Saved to a new vault" : "Saved to your vault") : "Couldn\u2019t save it";
+      actions.replaceChildren(make("div", { className: "note", textContent: note }));
       setTimeout(() => away(false), 1_800);
     };
     save.addEventListener("click", (e) => e.isTrusted && store());
@@ -542,7 +543,7 @@
       type: "passkey-create", rpId: request.rpId, challenge: request.challenge,
       userName: request.userName, userHandle: request.userHandle, excludeCredentials: request.exclude,
     });
-    sheetNote(got?.attestationObject ? "Saved to your vault" : "Couldn\u2019t save the passkey");
+    sheetNote(got?.attestationObject ? (got.created ? "Saved to a new vault" : "Saved to your vault") : "Couldn\u2019t save the passkey");
     if (got?.attestationObject) return got;
     return /excluded:/.test(got?.error ?? "") ? ALREADY_SAVED : refused();
   }

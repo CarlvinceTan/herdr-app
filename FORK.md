@@ -9,9 +9,12 @@ Upstream [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app), plus:
   Updates shows this fork's version beside upstream's latest release, and the sidebar's gear gets a
   badge when upstream is newer (`src/update.rs`, `defaults/frame/settings/main.js`).
 
-- Autofill from the person's vault (`~/code/cstack/vault`) in browser panes: passwords, codes,
-  addresses, cards, the save-password offer and passkeys (`vault passkey create`/`sign`), each
-  after Touch ID (`vendor/gpui-kit/crates/shell/src/autofill/`, `src/bin/herdr-autofill-host.rs`).
+- Autofill from a KeePass vault in browser panes: passwords, codes, addresses, cards, the
+  save-password offer and passkeys, each after Touch ID (`vendor/gpui-kit/crates/shell/src/autofill/`,
+  `src/bin/herdr-autofill-host.rs`). The vault CLI is `vault/`, built into the app by
+  `scripts/bundle-cef.sh`; the first thing saved makes a vault if there's none. Its home is the
+  author's `cstack/vault`: `scripts/sync-vault.sh` copies it here, and `cargo test --manifest-path
+  vault/Cargo.toml` tests it.
 - Pages move in step with the window: the Metal layer presents in Core Animation's transaction
   once a page exists (`present_with_native_views` in `vendor/gpui-pre-apple`), and pages whose
   panes aren't drawn hide in the same frame (`set_undrawn`).

@@ -121,6 +121,10 @@ mod host {
             }
             // A login just typed: whether the vault has it already. Nothing secret goes back.
             Some("known") => {
+                // No vault yet: everything is new, and saving makes one.
+                if vault(&["status"])?["exists"].as_bool() == Some(false) {
+                    return Ok(json!({}));
+                }
                 let (username, password) = (request["username"].as_str().unwrap_or_default(), request["password"].as_str().unwrap_or_default());
                 let Some(account) = accounts()?.into_iter().find(|account| account.username == username) else { return Ok(json!({})) };
                 let saved = vault(&["get", &account.title, "--field", "password"])?;
@@ -133,6 +137,7 @@ mod host {
                 if password.is_empty() {
                     return Err("nothing to save".into());
                 }
+                let created = ensure_vault()?;
                 let title = match accounts()?.into_iter().find(|account| account.username == username) {
                     Some(account) => account.title,
                     None => {
@@ -154,7 +159,7 @@ mod host {
                 if !output.status.success() {
                     return Err(String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("vault failed").to_owned());
                 }
-                Ok(json!({ "saved": title }))
+                Ok(json!({ "saved": title, "created": created }))
             }
             // A site's passkey request, answered by the vault itself.
             Some("passkeys") => passkeys(request, url),
@@ -200,11 +205,35 @@ mod host {
         let rp = relying_party(request, url)?;
         let user = request["userName"].as_str().unwrap_or_default();
         confirm(&if user.is_empty() { format!("save a passkey for {rp}") } else { format!("save a passkey for {user} on {rp}") })?;
+        let created = ensure_vault()?;
         let input = json!({
             "rpId": rp, "userName": user, "userHandle": request["userHandle"],
             "excludeCredentials": request["excludeCredentials"].as_array().cloned().unwrap_or_default(),
         });
-        vault_with_input(&["passkey", "create"], &input.to_string())
+        let mut made = vault_with_input(&["passkey", "create"], &input.to_string())?;
+        made["created"] = json!(created);
+        Ok(made)
+    }
+
+    // The first thing saved with no vault yet makes one where the vault keeps it by default, its
+    // master password random and kept in the Keychain (any KeePass app opens it with that
+    // password, from Keychain Access, "OpenCode Vault"). Returns whether it made one.
+    fn ensure_vault() -> Result<bool, String> {
+        let status = vault(&["status"])?;
+        if status["exists"].as_bool() == Some(true) {
+            return if status["passwordAvailable"].as_bool() == Some(true) {
+                Ok(false)
+            } else {
+                Err("the vault's master password isn't in the Keychain".into())
+            };
+        }
+        let mut bytes = [0u8; 32];
+        std::fs::File::open("/dev/urandom").and_then(|mut random| std::io::Read::read_exact(&mut random, &mut bytes))
+            .map_err(|e| format!("no randomness for a master password: {e}"))?;
+        let password: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        vault_with_input(&["create", "--password-stdin"], &password)?;
+        note("made a vault");
+        Ok(true)
     }
 
     // A sign-in with the passkey picked, after Touch ID.
@@ -304,13 +333,13 @@ mod host {
         labels[labels.len() - keep..].join(".")
     }
 
-    // The user's vault CLI. HERDR_VAULT names it; HERDR_VAULT_HOME runs it with another HOME, which
-    // keeps a test vault apart from the real one (whose path is in ~/.config/opencode/vault.json).
+    // The vault CLI: HERDR_VAULT names one, else the copy built into Herdr.app beside this helper,
+    // else `vault` on the PATH. HERDR_VAULT_HOME runs it with another HOME, which keeps a test
+    // vault apart from the real one (whose path is in ~/.config/opencode/vault.json).
     fn vault_command(args: &[&str]) -> Command {
-        let home = std::env::var("HOME").unwrap_or_default();
         let program = std::env::var("HERDR_VAULT").map(PathBuf::from).unwrap_or_else(|_| {
-            let mine = PathBuf::from(&home).join("code/cstack/vault/bin/vault");
-            if mine.exists() { mine } else { PathBuf::from("vault") }
+            let built_in = std::env::current_exe().ok().map(|exe| exe.with_file_name("vault"));
+            built_in.filter(|path| path.exists()).unwrap_or_else(|| PathBuf::from("vault"))
         });
         let mut command = Command::new(program);
         command.args(args);
