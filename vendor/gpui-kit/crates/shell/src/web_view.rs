@@ -318,6 +318,11 @@ mod native {
                     switch("enable-logging", Some("stderr"));
                     switch("vmodule", Some(&modules));
                 }
+                // HERDR_KEEP_PAGES_AWAKE keeps pages live while the window is covered, for tests run
+                // in a copy behind another window (a covered page is hidden and takes no input).
+                if std::env::var_os("HERDR_KEEP_PAGES_AWAKE").is_some() {
+                    switch("disable-backgrounding-occluded-windows", None);
+                }
                 let folders: Vec<String> = ["ublock".to_owned(), own_extension_folder("extensions-page"), own_extension_folder("autofill")]
                     .iter().map(|folder| state_dir().join(folder))
                     .filter(|folder| folder.join("manifest.json").exists())

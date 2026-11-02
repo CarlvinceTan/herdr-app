@@ -8,7 +8,7 @@
   // A lookup that hangs gives up rather than leaving the page waiting; a fill waits for Touch ID.
   const LOOKUP_WAIT = 5_000;
   const TOUCH_ID_WAIT = 130_000;
-  const ASKS_FOR_TOUCH_ID = new Set(["fill", "code", "card", "passkey"]);
+  const ASKS_FOR_TOUCH_ID = new Set(["fill", "code", "card", "passkey-create", "passkey-sign"]);
   async function ask(message) {
     const wait = ASKS_FOR_TOUCH_ID.has(message.type) ? TOUCH_ID_WAIT : LOOKUP_WAIT;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -217,7 +217,8 @@
 
   async function onFocus(event) {
     const field = event.target;
-    const what = filling ? null : kind(field);
+    const webauthn = field instanceof HTMLInputElement && (field.autocomplete ?? "").toLowerCase().includes("webauthn");
+    const what = filling ? null : kind(field) ?? (webauthn && conditional ? "username" : null);
     if (!what) return;
     if (what === "address") return onAddressField(field);
     if (what === "card") return onCardField(field);
@@ -225,11 +226,16 @@
     if (document.activeElement !== field) return;
     if (what === "code") return onCodeField(field, accounts);
     const scope = field.form ?? document;
-    const choices = accounts;
-    if (!choices.length) return;
+    // A site waiting for a passkey (conditional mediation) has its passkeys first; picking one
+    // signs in, so it never happens by itself.
+    const keys = conditional?.keys ?? [];
+    if (!accounts.length && !keys.length) return;
     const pick = (account) => fillLogin(field, account);
-    if (choices.length === 1 && firstOffer(scope, "login")) return pick(choices[0]);
-    show(field, choices.map((account) => ({ label: account.username || account.title, pick: () => pick(account) })));
+    if (!keys.length && accounts.length === 1 && firstOffer(scope, "login")) return pick(accounts[0]);
+    show(field, [
+      ...keys.map((key) => ({ label: `${key.username || key.title} \u00b7 Passkey`, pick: () => useWaitingPasskey(key) })),
+      ...accounts.map((account) => ({ label: account.username || account.title, pick: () => pick(account) })),
+    ]);
   }
 
   const STYLE = `
@@ -282,7 +288,7 @@
   }
 
   function onKey(e) {
-    if (!menu) return;
+    if (!menu || !e.isTrusted) return;
     const count = menu.rows.length;
     if (e.key === "ArrowDown") select((menu.at + 1) % count);
     else if (e.key === "ArrowUp") select((menu.at - 1 + count) % count);
@@ -427,16 +433,199 @@
   }, true);
   checkOffer();
 
-  // A site's passkey request, relayed from the page's world (webauthn.js); one at a time.
-  let passkeyBusy = false;
+  // A site's passkey requests, from the page's own world (webauthn.js). The vault answers when it
+  // has a passkey for the site, or when asked to save a new one; otherwise the page asks Chromium.
+  const passkeyIds = new Set();
+  // A sign-in waiting for a passkey to be picked in the field menu (conditional mediation).
+  let conditional = null;
+  let sheet = null;
+
+  const answerPage = (id, answer) =>
+    document.dispatchEvent(new CustomEvent("herdr-passkey-answer", { detail: JSON.stringify({ id, ...answer }) }));
+  const refused = (message = "The passkey wasn't used.") => ({ error: "NotAllowedError", message });
+  const ALREADY_SAVED = { error: "InvalidStateError", message: "The vault already has a passkey for this account." };
+
   document.addEventListener("herdr-passkey", async (event) => {
     let request;
     try { request = JSON.parse(event.detail); } catch { return; }
-    const answer = passkeyBusy ? {} : (passkeyBusy = true, await ask({ type: "passkey", mode: request.mode === "create" ? "create" : "get", rpId: String(request.rpId ?? "") }));
-    if (!passkeyBusy) return;
-    passkeyBusy = false;
-    document.dispatchEvent(new CustomEvent("herdr-passkey-ready", { detail: JSON.stringify({ id: request.id, ...answer }) }));
+    // The page sends again until it hears back; each request is answered once.
+    if (typeof request?.id !== "string" || passkeyIds.has(request.id)) return;
+    passkeyIds.add(request.id);
+    answerPage(request.id, { ack: true });
+    if (window !== window.top || typeof request.rpId !== "string" || typeof request.challenge !== "string") {
+      return answerPage(request.id, { fallback: true });
+    }
+    request.allow = Array.isArray(request.allow) ? request.allow.filter((id) => typeof id === "string") : [];
+    request.exclude = Array.isArray(request.exclude) ? request.exclude.filter((id) => typeof id === "string") : [];
+    // A new request ends one waiting in the menu or a sheet, as in Chrome.
+    if (conditional) {
+      answerPage(conditional.id, { error: "AbortError", message: "Another passkey request started." });
+      conditional = null;
+    }
+    closeSheet();
+    if (request.kind === "create") answerPage(request.id, await createPasskey(request));
+    else if (request.kind === "get") getPasskey(request);
+    else answerPage(request.id, { fallback: true });
   });
+
+  document.addEventListener("herdr-passkey-cancel", (event) => {
+    let id;
+    try { ({ id } = JSON.parse(event.detail)); } catch { return; }
+    if (conditional?.id === id) conditional = null;
+    if (sheet?.id === id) closeSheet();
+  });
+
+  async function signIn(request, key) {
+    const got = await ask({ type: "passkey-sign", rpId: request.rpId, challenge: request.challenge, credentialId: key.credentialId });
+    return got?.signature ? got : refused();
+  }
+
+  async function getPasskey(request) {
+    const listed = await ask({ type: "passkeys", rpId: request.rpId });
+    const keys = (listed.passkeys ?? []).filter((key) => !request.allow.length || request.allow.includes(key.credentialId));
+    if (!keys.length) return answerPage(request.id, { fallback: true });
+    if (request.mediation === "conditional") {
+      conditional = { ...request, keys };
+      // A login field focused already shows them now.
+      if (document.activeElement instanceof HTMLInputElement) onFocus({ target: document.activeElement });
+      return;
+    }
+    // One passkey goes straight to Touch ID; several ask which.
+    let key = keys[0];
+    if (keys.length > 1) {
+      const choice = await askSheet({
+        id: request.id,
+        title: "Sign in with a passkey",
+        rows: keys.map((each) => ({ label: each.username || each.title, value: each })),
+        actions: [{ label: "Other device", value: "other" }],
+      });
+      if (choice === "other") return answerPage(request.id, { fallback: true });
+      if (typeof choice !== "object") return answerPage(request.id, refused());
+      key = choice;
+    }
+    answerPage(request.id, await signIn(request, key));
+  }
+
+  async function useWaitingPasskey(key) {
+    hide();
+    const request = conditional;
+    if (!request) return;
+    conditional = null;
+    const answer = await signIn(request, key);
+    // Touch ID cancelled: the site is still waiting, and the passkey stays in the menu.
+    if (answer.error) conditional = request;
+    else answerPage(request.id, answer);
+  }
+
+  async function createPasskey(request) {
+    const listed = await ask({ type: "passkeys", rpId: request.rpId });
+    if (listed.error) return { fallback: true };
+    if ((listed.passkeys ?? []).some((key) => request.exclude.includes(key.credentialId))) {
+      await askSheet({
+        id: request.id,
+        title: "Already in your vault",
+        text: `Your vault has a passkey for this account.`,
+        actions: [{ label: "OK", value: "ok", primary: true }],
+      });
+      return ALREADY_SAVED;
+    }
+    const choice = await askSheet({
+      id: request.id,
+      title: "Save a passkey in your vault?",
+      text: request.userName || request.userDisplayName,
+      actions: [{ label: "Other device", value: "other" }, { label: "Save", value: "save", primary: true }],
+      keep: true,
+    });
+    if (choice === "other") return { fallback: true };
+    if (choice !== "save") return refused();
+    const got = await ask({
+      type: "passkey-create", rpId: request.rpId, challenge: request.challenge,
+      userName: request.userName, userHandle: request.userHandle, excludeCredentials: request.exclude,
+    });
+    sheetNote(got?.attestationObject ? "Saved to your vault" : "Couldn\u2019t save the passkey");
+    if (got?.attestationObject) return got;
+    return /excluded:/.test(got?.error ?? "") ? ALREADY_SAVED : refused();
+  }
+
+  const SHEET_STYLE = `
+    :host { all: initial; }
+    .toast { position: fixed; z-index: 2147483647; top: 12px; right: 12px; width: 300px; box-sizing: border-box;
+      padding: 12px 12px 10px 14px; border-radius: 10px; background: #ffffff; color: #1f2328; border: 1px solid #d8dbe0;
+      box-shadow: 0 10px 28px rgba(0,0,0,.18); font: 13px/1.4 -apple-system, system-ui, sans-serif; }
+    .title { font-weight: 600; padding-right: 22px; }
+    .site { opacity: .65; font-size: 12px; margin-bottom: 8px; }
+    .text { margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button { font: inherit; color: inherit; cursor: default; }
+    .account { display: block; width: 100%; height: 28px; margin-top: 4px; padding: 0 8px; text-align: left; border-radius: 6px;
+      border: 1px solid #d8dbe0; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .account:hover { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+    .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+    .actions button { border-radius: 6px; padding: 4px 12px; border: 1px solid #d8dbe0; background: transparent; }
+    .actions .primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+    .close { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0; border: none; background: transparent;
+      font-size: 16px; line-height: 20px; opacity: .55; }
+    .close:hover { opacity: 1; }
+    .note { opacity: .7; }
+    @media (prefers-color-scheme: dark) {
+      .toast { background: #2b2f36; color: #dcdfe4; border-color: #3d424b; box-shadow: 0 10px 28px rgba(0,0,0,.45); }
+      .account, .actions button { border-color: #474d57; }
+      .account:hover, .actions .primary { background: #2f6fde; border-color: #2f6fde; }
+    }`;
+
+  // A small sheet at the top right for a passkey choice. It answers with the row or action picked,
+  // or "cancel"; only a real click counts. With `keep`, it stays up after the pick for a note.
+  function askSheet({ id, title, text = "", rows = [], actions = [], keep = false }) {
+    closeSheet();
+    const make = (tag, props) => Object.assign(document.createElement(tag), props);
+    const host = document.createElement("herdr-autofill-passkey");
+    const root = host.attachShadow({ mode: "closed" });
+    const box = make("div", { className: "toast" });
+    const close = make("button", { className: "close", textContent: "\u00d7", title: "Close" });
+    box.append(close, make("div", { className: "title", textContent: title }), make("div", { className: "site", textContent: location.hostname }));
+    if (text) box.append(make("div", { className: "text", textContent: text }));
+    const list = rows.map((row) => make("button", { className: "account", textContent: row.label }));
+    box.append(...list);
+    const bar = make("div", { className: "actions" });
+    const buttons = actions.map((action) => make("button", { className: action.primary ? "primary" : "", textContent: action.label }));
+    bar.append(...buttons);
+    if (buttons.length) box.append(bar);
+    root.append(make("style", { textContent: SHEET_STYLE }), box);
+    document.documentElement.append(host);
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+      sheet = { id, host, bar, settle, make };
+      const pick = (value) => (e) => {
+        if (!e.isTrusted || sheet?.host !== host) return;
+        settle(value);
+        if (keep && value !== "other") bar.replaceChildren(make("div", { className: "note", textContent: "Waiting for Touch ID\u2026" }));
+        else closeSheet();
+      };
+      close.addEventListener("click", (e) => { if (e.isTrusted && sheet?.host === host) closeSheet(); });
+      list.forEach((el, i) => el.addEventListener("click", pick(rows[i].value)));
+      buttons.forEach((el, i) => el.addEventListener("click", pick(actions[i].value)));
+      // Where the controls are, for tests that press them as a person would.
+      const at = (el) => { const r = el.getBoundingClientRect(); return `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`; };
+      host.dataset.close = at(close);
+      list.forEach((el, i) => { host.dataset[`row${i}`] = at(el); });
+      buttons.forEach((el, i) => { host.dataset[actions[i].value] = at(el); });
+    });
+  }
+
+  function closeSheet() {
+    if (!sheet) return;
+    const { host, settle } = sheet;
+    sheet = null;
+    host.remove();
+    settle("cancel");
+  }
+
+  function sheetNote(text) {
+    if (!sheet) return;
+    const { host, bar, make } = sheet;
+    bar.replaceChildren(make("div", { className: "note", textContent: text }));
+    setTimeout(() => { if (sheet?.host === host) closeSheet(); }, 1_600);
+  }
 
   document.addEventListener("focusin", onFocus, true);
   // A field focused before this arrived (autofocus) gets its turn now.

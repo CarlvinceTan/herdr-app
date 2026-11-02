@@ -2,10 +2,11 @@
   "manifest_version": 3,
   "name": "Herdr Autofill",
   "version": "1.0",
-  "description": "Fills passwords and codes from your vault in Herdr's browser panes, after Touch ID.",
+  "description": "Fills passwords, codes and passkeys from your vault in Herdr's browser panes, after Touch ID.",
   "permissions": ["nativeMessaging"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
-    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "all_frames": true, "run_at": "document_idle" }
+    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "all_frames": true, "run_at": "document_idle" },
+    { "matches": ["https://*/*", "http://localhost/*"], "js": ["webauthn.js"], "world": "MAIN", "run_at": "document_start" }
   ]
 }
