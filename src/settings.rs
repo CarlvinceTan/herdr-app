@@ -373,6 +373,11 @@ pub struct Person {
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
+    /// This fork: a mod that asks what a new pane should be. With it, a tab's last pane closing
+    /// leaves it, closing a space's last tab gives the space a fresh tab with it, and a new space
+    /// starts at home with it; tabs and spaces close only when closed themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane_chooser: Option<String>,
     /// Fonts for layouts that don't set their own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font: Option<String>,
@@ -443,6 +448,7 @@ impl Default for Person {
             zoom: 1.0,
             sounds: Sounds::default(),
             core: None,
+            pane_chooser: None,
             font: None,
             font_size: None,
             ui_font: None,

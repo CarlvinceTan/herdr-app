@@ -32,6 +32,11 @@ if pgrep -f "^$app/Contents/MacOS/Herdr\$" >/dev/null; then
   fi
 fi
 
+# Edits to files Herdr rewrites while it runs (shared.json) go in while it's closed.
+if [ -n "${HERDR_WHILE_CLOSED:-}" ]; then
+  sh -c "$HERDR_WHILE_CLOSED"
+fi
+
 rm -rf "$app.old"
 [ -d "$app" ] && mv "$app" "$app.old"
 mv "$app.new" "$app"

@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{command, on_click, pages, set_suspended, start};
+pub use native::{command, on_click, pages, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -62,6 +62,7 @@ mod native {
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
     pub fn set_suspended(_: bool) {}
+    pub fn set_undrawn(_: std::collections::HashSet<String>) {}
 }
 
 #[cfg(target_os = "macos")]
@@ -164,6 +165,7 @@ mod native {
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
+        static UNDRAWN: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
         // Popup windows open now (a site's sign-in, usually).
         static POPUPS: RefCell<Vec<Browser>> = const { RefCell::new(Vec::new()) };
         static GPUI_VIEW: Cell<Id> = const { Cell::new(std::ptr::null_mut()) };
@@ -843,6 +845,9 @@ mod native {
         let gpui_view = handle.ns_view.as_ptr() as Id;
         GPUI_VIEW.set(gpui_view);
         watch_presses();
+        // A page moves in Core Animation's transaction; the window's drawing has to land in the
+        // same one, or for a frame the pane and its page disagree (the flash on zoom).
+        gpui_apple::metal_renderer::MetalRenderer::present_with_native_views(true);
         let (left, top) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
         let (width, height) = (f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)));
         let (space, parent) = unsafe {
@@ -982,17 +987,28 @@ mod native {
         });
     }
 
+    /// Pages whose panes the window isn't drawing now (another tab, or another pane zoomed), so
+    /// they hide in the same frame rather than when a mod gets round to it.
+    pub fn set_undrawn(ids: std::collections::HashSet<String>) {
+        if UNDRAWN.with_borrow(|undrawn| *undrawn == ids) {
+            return;
+        }
+        UNDRAWN.set(ids);
+        apply_visibility();
+    }
+
     fn apply_visibility() {
         let suspended = SUSPENDED.get();
         // A hidden page mustn't keep the keyboard.
+        let undrawn = |id: &str| UNDRAWN.with_borrow(|undrawn| undrawn.contains(id));
         if let Some(id) = page_with_keys()
-            && (suspended || VIEWS.with_borrow(|views| views.get(&id).is_some_and(|view| !view.shown)))
+            && (suspended || undrawn(&id) || VIEWS.with_borrow(|views| views.get(&id).is_some_and(|view| !view.shown)))
         {
             take_keys_back();
         }
         VIEWS.with_borrow(|views| {
-            for view in views.values() {
-                let hidden: BOOL = if view.shown && !suspended { NO } else { YES };
+            for (id, view) in views.iter() {
+                let hidden: BOOL = if view.shown && !suspended && !undrawn(id) { NO } else { YES };
                 unsafe {
                     let _: () = msg_send![view.host, setHidden: hidden];
                 }

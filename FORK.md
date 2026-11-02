@@ -9,6 +9,16 @@ Upstream [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app), plus:
   Updates shows this fork's version beside upstream's latest release, and the sidebar's gear gets a
   badge when upstream is newer (`src/update.rs`, `defaults/frame/settings/main.js`).
 
+- Autofill from the person's vault (`~/code/cstack/vault`) in browser panes: passwords, codes,
+  addresses, cards, the save-password offer and passkeys (`vault passkey create`/`sign`), each
+  after Touch ID (`vendor/gpui-kit/crates/shell/src/autofill/`, `src/bin/herdr-autofill-host.rs`).
+- Pages move in step with the window: the Metal layer presents in Core Animation's transaction
+  once a page exists (`present_with_native_views` in `vendor/gpui-pre-apple`), and pages whose
+  panes aren't drawn hide in the same frame (`set_undrawn`).
+- settings.json `"pane_chooser": "<mod>"`: a tab's last pane closing leaves that mod, closing a
+  space's last tab gives the space a fresh tab with it, and a person's plain new space starts at
+  home with it. Tabs and spaces then close only when closed themselves (`src/model.rs`).
+
 Work happens on branch `cef`. `origin` is the fork, `upstream` is herdrdev. The personal mods that
 use the browser (`my-browser`, `my-tabs`, `my-pane` and others) live in `~/.config/herdr-app/mods`,
 not here.
@@ -32,6 +42,8 @@ When Settings > Updates says upstream is newer:
    `target/bundle/Herdr.app/Contents/MacOS/Herdr` with `HERDR_APP_HOME=~/.config/herdr-dev`,
    `XDG_STATE_HOME=~/.local/state/herdr-dev` and the `HC_*` variables unset.
 5. `scripts/install-fork.sh`: builds, replaces `/Applications/Herdr.app`, and reopens it.
+   `HERDR_WHILE_CLOSED='<command>'` runs a command while Herdr is closed (for edits to files it
+   rewrites while running, such as `shared.json`).
    Terminals and agents keep running; they live in herdr-core.
 6. Settings > Updates should now show the new version, with upstream up to date.
 

@@ -856,6 +856,7 @@ impl AppWindow {
             match loaded {
                 Ok(p) => {
                     self.person = p;
+                    self.model.pane_chooser = self.person.pane_chooser.clone().filter(|m| !m.is_empty());
                     let _ = std::fs::remove_file(file("settings.error"));
                 }
                 Err(e) => self.report("settings", &e),
@@ -2354,6 +2355,23 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
+    /// A space whose first tab holds the pane chooser, at home (that machine's, for another), shown
+    /// at once.
+    fn new_chooser_space(&mut self, name: &str, machine: Option<String>) -> Result<Value, String> {
+        let on = machine.as_deref();
+        self.require_document(on)?;
+        let folder = if on.is_some() { String::new() } else { home() };
+        let space = self.model.fresh_id_on("sp", on);
+        let ctx = self.model.fresh_id_on("tb", on);
+        let chooser = self.model.chooser_pane(on).ok_or("no pane chooser set")?;
+        let pane = chooser.id.clone();
+        self.model.add_space(&space, name.trim(), &folder, Tab::with_pane(&ctx, "", chooser));
+        if let Some(p) = self.model.space_mut(&space) {
+            p.machine = machine;
+        }
+        Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
+    }
+
     /// A tab in a space (default: the shown one), shown at once.
     fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
@@ -2780,6 +2798,13 @@ impl AppWindow {
             // ---- spaces
             "space.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
+                // With a pane chooser, a person's plain new space starts at home and asks what its
+                // first pane should be.
+                let plain = person && ["folder", "argv", "task", "tab"].iter().all(|k| a.get(*k).is_none_or(Value::is_null));
+                if plain && self.model.pane_chooser.is_some() {
+                    let r = self.new_chooser_space(name, Self::owned(a, "machine").filter(|m| !m.is_empty()));
+                    return self.answer(r);
+                }
                 let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()));
                 self.answer(r);
             }
@@ -2841,8 +2866,9 @@ impl AppWindow {
             "tab.close" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to close") };
                 let Some(p) = self.model.space_of(&id) else { return self.fail(format!("no tab {id:?}")) };
-                // The last tab takes its space with it: ask like closing the space.
-                if p.tabs.len() == 1 {
+                // The last tab takes its space with it: ask like closing the space. With a pane
+                // chooser, the space stays and gets a fresh tab instead.
+                if p.tabs.len() == 1 && self.model.pane_chooser.is_none() {
                     let mut args = json!({ "id": p.id });
                     args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
                     return self.dispatch("space.close", &args, person, window, cx);
@@ -2912,7 +2938,7 @@ impl AppWindow {
                 if c.root.find(&pane).is_some_and(|n| !n.closable()) {
                     return;
                 }
-                if c.root.panes().len() == 1 {
+                if c.root.panes().len() == 1 && self.model.pane_chooser.is_none() {
                     let id = c.id.clone();
                     return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
                 }
@@ -4186,11 +4212,24 @@ impl AppWindow {
         }
     }
 
+    /// Browser pages (by my-browser's slot, shared "browser.slots": pane to slot) whose panes this
+    /// frame doesn't draw: another tab's, or beside a zoomed pane. They hide in the same frame.
+    fn undrawn_pages(&self) -> std::collections::HashSet<String> {
+        let Some(Value::Object(slots)) = crate::mods::shared("browser.slots") else { return Default::default() };
+        let tab = self.model.active_space().and_then(|s| s.active_tab());
+        let drawn = |pane: &str| tab.is_some_and(|t| match t.zoomed.as_deref() {
+            Some(zoomed) => zoomed == pane,
+            None => t.root.find(pane).is_some(),
+        });
+        slots.iter().filter(|(pane, _)| !drawn(pane)).map(|(_, slot)| slot.to_string()).collect()
+    }
+
     fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
         // A web page draws above everything, so it steps aside for a dialog or a window (What's new,
         // Welcome, Feedback). Popups cut their own hole in it instead.
         gpui_shell::web_view::set_suspended(self.overlays.iter().any(|o| matches!(o.kind, OverlayKind::Dialog | OverlayKind::Window)));
+        gpui_shell::web_view::set_undrawn(self.undrawn_pages());
         let mut toast_y = 16.0;
         // Drawn last, so it stays clickable over an open dialog.
         let pill = self.render_update_pill(cx);

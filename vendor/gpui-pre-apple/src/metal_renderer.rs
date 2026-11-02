@@ -106,6 +106,10 @@ impl InstanceBufferPool {
     }
 }
 
+
+/// HERDR: see `MetalRenderer::present_with_native_views`.
+static PRESENT_WITH_NATIVE_VIEWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
@@ -408,6 +412,12 @@ impl MetalRenderer {
         &self.sprite_atlas
     }
 
+    /// HERDR: present every frame in Core Animation's transaction, for windows with native views
+    /// (web pages) that must move in step with the drawing.
+    pub fn present_with_native_views(on: bool) {
+        PRESENT_WITH_NATIVE_VIEWS.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
         self.presents_with_transaction = presents_with_transaction;
         if let Some(layer) = &self.layer {
@@ -504,7 +514,13 @@ impl MetalRenderer {
             }
         };
 
-        if self.presents_with_transaction {
+        // HERDR: native views beside the drawing (web pages) move in Core Animation's transaction;
+        // a frame presented with it shows both at once, so a page never trails its pane.
+        let with_transaction = self.presents_with_transaction || PRESENT_WITH_NATIVE_VIEWS.load(std::sync::atomic::Ordering::Relaxed);
+        if with_transaction != layer.presents_with_transaction() {
+            layer.set_presents_with_transaction(with_transaction);
+        }
+        if with_transaction {
             command_buffer.commit();
             command_buffer.wait_until_scheduled();
             drawable.present();

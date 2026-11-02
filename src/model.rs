@@ -86,6 +86,9 @@ pub struct Model {
     seq: u64,
     /// Where each terminal works now: its repo (worktrees included) and branch.
     pub folder_info: HashMap<String, FolderInfo>,
+    /// settings.json `pane_chooser`: the mod a tab keeps when its last pane goes, so tabs and
+    /// spaces only close when closed themselves. None: they close with their last pane and tab.
+    pub pane_chooser: Option<String>,
 }
 
 /// Herdr's attention priority: blocked > done > working > idle > nothing.
@@ -324,8 +327,39 @@ impl Model {
         true
     }
 
+    /// A pane asking what it should be, for a tab that would otherwise be empty.
+    pub fn chooser_pane(&mut self, machine: Option<&str>) -> Option<Node> {
+        let name = self.pane_chooser.clone()?;
+        let id = self.fresh_id_on("p", machine);
+        Some(Node::block(id, Content::Mod { name, props: serde_json::json!({}) }))
+    }
+
+    pub fn is_chooser(&self, pane_id: &str) -> bool {
+        let chooser = self.pane_chooser.as_deref();
+        chooser.is_some() && self.tab_of(pane_id).and_then(|c| c.root.find(pane_id)).is_some_and(|n| {
+            matches!(&n.kind, crate::layout::Kind::Block { content: Content::Mod { name, .. } } if Some(name.as_str()) == chooser)
+        })
+    }
+
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
+    /// With a pane chooser, a tab's last pane gives way to the chooser instead, and a lone
+    /// chooser stays.
     pub fn remove_pane(&mut self, pane_id: &str) -> (bool, bool) {
+        let last = self.tab_of(pane_id).is_some_and(|c| c.root.panes().len() == 1 && c.root.find(pane_id).is_some());
+        if last && self.pane_chooser.is_some() {
+            if self.is_chooser(pane_id) {
+                return (false, false);
+            }
+            let machine = self.space_of(pane_id).and_then(|s| s.machine.clone());
+            let chooser = self.chooser_pane(machine.as_deref()).unwrap();
+            let id = chooser.id.clone();
+            let c = self.tab_of_mut(pane_id).unwrap();
+            c.root = chooser;
+            c.zoomed = None;
+            c.before.clear();
+            c.focused = Some(id);
+            return (false, false);
+        }
         let Some(c) = self.tab_of_mut(pane_id) else { return (false, false) };
         c.root.remove(pane_id);
         if c.zoomed.as_deref() == Some(pane_id) {
@@ -346,9 +380,19 @@ impl Model {
         (true, space_closed)
     }
 
-    /// Removes a tab. Returns its terminal addresses and whether its space closed.
+    /// Removes a tab. Returns its terminal addresses and whether its space closed. With a pane
+    /// chooser, a space's last tab is replaced by a fresh one holding the chooser instead.
     pub fn remove_tab(&mut self, ctx: &str) -> (Vec<String>, bool) {
         let Some(pi) = self.spaces.iter().position(|p| p.tab(ctx).is_some()) else { return (vec![], false) };
+        if self.pane_chooser.is_some() && self.spaces[pi].tabs.len() == 1 {
+            let machine = self.spaces[pi].machine.clone();
+            let chooser = self.chooser_pane(machine.as_deref()).unwrap();
+            let fresh = Tab::with_pane(&self.fresh_id_on("tb", machine.as_deref()), "", chooser);
+            let p = &mut self.spaces[pi];
+            let removed = std::mem::replace(&mut p.tabs[0], fresh);
+            p.active = Some(p.tabs[0].id.clone());
+            return (addresses(&removed.root), false);
+        }
         let p = &mut self.spaces[pi];
         let ci = p.tabs.iter().position(|c| c.id == ctx).unwrap();
         let removed = p.tabs.remove(ci);
@@ -704,6 +748,31 @@ mod tests {
         // Opening it again takes it off the recent list.
         m.add_space("p4", "web", "/src/web", Tab::new("c4", "x", "x4", "t4"));
         assert!(m.recent.is_empty());
+    }
+
+    #[test]
+    fn with_a_pane_chooser_tabs_and_spaces_stay_until_closed_themselves() {
+        let mut m = model_with_one();
+        m.pane_chooser = Some("chooser".into());
+        m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
+        // The last pane of a tab gives way to the chooser; the tab stays.
+        assert_eq!(m.remove_pane("x2"), (false, false));
+        let c = m.tab("c2").unwrap();
+        let chooser = c.root.panes()[0].id.clone();
+        assert!(m.is_chooser(&chooser));
+        assert_eq!(c.focused.as_deref(), Some(chooser.as_str()));
+        // A lone chooser closing stays.
+        assert_eq!(m.remove_pane(&chooser), (false, false));
+        assert!(m.tab("c2").is_some_and(|c| c.root.find(&chooser).is_some()));
+        // Closing a tab that isn't the last removes it; the last one is replaced, the space stays.
+        assert_eq!(m.remove_tab("c2"), (vec![], false));
+        assert!(m.tab("c2").is_none());
+        let (killed, closed) = m.remove_tab("c1");
+        assert_eq!((killed, closed), (vec!["t1".to_owned()], false));
+        let p = m.space("p1").unwrap();
+        assert_eq!(p.tabs.len(), 1);
+        assert!(m.is_chooser(&p.tabs[0].root.panes()[0].id.clone()));
+        assert_eq!(m.space("p1").unwrap().active.as_deref(), Some(m.space("p1").unwrap().tabs[0].id.as_str()));
     }
 
     #[test]
