@@ -3613,35 +3613,12 @@ fn is_drag_from_this_window(this: &Object, dragging_info: id) -> bool {
     std::ptr::eq(source as *const Object, this as *const Object)
 }
 
-// HERDR (temporary): what a drag into the window carries and whether it was taken, in
-// ~/Library/Logs/Herdr/drops.log, to find why some drops don't land. Types and counts only.
-fn note_drag(what: &str, dragging_info: id, detail: &str) {
-    let types: Vec<String> = unsafe {
-        let pasteboard: id = msg_send![dragging_info, draggingPasteboard];
-        let types: id = msg_send![pasteboard, types];
-        if types == nil {
-            Vec::new()
-        } else {
-            types.iter().map(|t| CStr::from_ptr(NSString::UTF8String(t)).to_string_lossy().into_owned()).collect()
-        }
-    };
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Logs/Herdr");
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("drops.log")) {
-        use std::io::Write as _;
-        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let _ = writeln!(file, "{at} {what} {detail} types={}", types.join(","));
-    }
-}
-
 extern "C" fn dragging_entered(this: &Object, _: Sel, dragging_info: id) -> NSDragOperation {
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
     let paths = external_paths_from_event(dragging_info);
-    let count = paths.as_ref().map_or(0, |paths| paths.paths().len());
     let taken = paths.map(|paths| FileDropEvent::Entered { position, paths }).is_some_and(|event| send_file_drop_event(window_state, event));
-    note_drag("entered", dragging_info, &format!("paths={count} taken={taken}"));
     if taken {
         if is_source_window {
             return NSDragOperationMove;
@@ -3674,9 +3651,58 @@ extern "C" fn dragging_exited(this: &Object, _: Sel, _: id) {
 extern "C" fn perform_drag_operation(this: &Object, _: Sel, dragging_info: id) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
-    let taken = send_file_drop_event(window_state, FileDropEvent::Submit { position });
-    note_drag("dropped", dragging_info, &format!("taken={taken}"));
-    taken.to_objc()
+    // HERDR: a promised file (Photos, a screenshot's thumbnail, Mail) has only a stand-in path
+    // until it's received; it's received into a folder of Herdr's and dropped from there.
+    if unsafe { receive_promised_files(this, dragging_info, position) } {
+        send_file_drop_event(window_state, FileDropEvent::Exited);
+        return YES;
+    }
+    send_file_drop_event(window_state, FileDropEvent::Submit { position }).to_objc()
+}
+
+// HERDR: asks the drag's source to write its promised files into a new folder under the temp
+// folder, and drops each one at `position` as it arrives. False when the drag promises none.
+unsafe fn receive_promised_files(window: &Object, dragging_info: id, position: Point<Pixels>) -> bool {
+    unsafe {
+        let pasteboard: id = msg_send![dragging_info, draggingPasteboard];
+        let classes = NSArray::arrayWithObject(nil, class!(NSFilePromiseReceiver) as *const Class as id);
+        let receivers: id = msg_send![pasteboard, readObjectsForClasses: classes options: nil];
+        let count: NSUInteger = if receivers == nil { 0 } else { msg_send![receivers, count] };
+        if count == 0 {
+            return false;
+        }
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let folder = std::env::temp_dir().join("herdr-drops").join(stamp.to_string());
+        if std::fs::create_dir_all(&folder).is_err() {
+            return false;
+        }
+        let folder_url: id = msg_send![class!(NSURL), fileURLWithPath: NSString::alloc(nil).init_str(&folder.to_string_lossy()) isDirectory: YES];
+        let options: id = msg_send![class!(NSDictionary), dictionary];
+        let queue: id = msg_send![class!(NSOperationQueue), mainQueue];
+        // The window outlives a drop into it; the reader runs on the main queue.
+        let window = window as *const Object as usize;
+        let reader = RcBlock::new(move |url: *mut c_void, error: *mut c_void| {
+            if url.is_null() || !error.is_null() {
+                return;
+            }
+            let path: id = msg_send![url as id, path];
+            if path == nil {
+                return;
+            }
+            let path = CStr::from_ptr(NSString::UTF8String(path)).to_string_lossy().into_owned();
+            let state = get_window_state(&*(window as *const Object));
+            let paths = ExternalPaths(smallvec::smallvec![PathBuf::from(path)]);
+            send_file_drop_event(state.clone(), FileDropEvent::Entered { position, paths });
+            send_file_drop_event(state.clone(), FileDropEvent::Submit { position });
+            send_file_drop_event(state, FileDropEvent::Exited);
+        });
+        for i in 0..count {
+            let receiver: id = msg_send![receivers, objectAtIndex: i];
+            let reader = &*reader as *const _ as *const c_void;
+            let () = msg_send![receiver, receivePromisedFilesAtDestination: folder_url options: options operationQueue: queue reader: reader];
+        }
+        true
+    }
 }
 
 fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths> {

@@ -132,6 +132,7 @@ mod native {
     const ZOOMS: [f64; 11] = [0.5, 0.6, 0.7, 0.75, DEFAULT_ZOOM, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
     const CORNER_RADIUS: f64 = 9.0;
     const HOLE_RADIUS: f64 = 8.0;
+    const EXTENSIONS_SETTLE: Duration = Duration::from_millis(2500);
     const LEFT_MOUSE_DOWN: u64 = 1;
     const RIGHT_MOUSE_DOWN: u64 = 3;
     const COMMAND_KEY: u64 = 1 << 20;
@@ -178,12 +179,17 @@ mod native {
         static LAST_CLICK: Cell<f64> = const { Cell::new(0.0) };
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
+        static STARTED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+        // Pages asked for while extensions are still getting ready (page id, address).
+        static SETTLING: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
         static UNDRAWN: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
         static COVERS: RefCell<Vec<Cover>> = const { RefCell::new(Vec::new()) };
         static APPLIED_COVERS: RefCell<Vec<Cover>> = const { RefCell::new(Vec::new()) };
         // Each host's holes, in its own coordinates, for presses to pass through (by host pointer).
         static HOST_HOLES: RefCell<HashMap<usize, Vec<NsRect>>> = RefCell::new(HashMap::new());
+        // How many holes each host's mask has now (by host pointer), for `web.report`.
+        static MASK_HOLES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
         // Popup windows open now (a site's sign-in, usually).
         static POPUPS: RefCell<Vec<Browser>> = const { RefCell::new(Vec::new()) };
         static GPUI_VIEW: Cell<Id> = const { Cell::new(std::ptr::null_mut()) };
@@ -479,6 +485,7 @@ mod native {
                 return false;
             }
             STARTED.set(true);
+            STARTED_AT.set(Some(Instant::now()));
             // The debugging port opens on a thread of its own a moment later. It's sealed before
             // the app goes on to start any children, the core among them.
             if debug_port > 0 {
@@ -544,6 +551,40 @@ mod native {
         }
     }
 
+    /// How long after Chromium starts its extensions' page scripts (uBlock's, autofill's) are
+    /// ready. A page loaded sooner never gets them, and one like YouTube never reloads to.
+    fn extensions_settle() -> Duration {
+        std::env::var("HERDR_PAGE_SETTLE_MS").ok().and_then(|ms| ms.parse().ok()).map_or(EXTENSIONS_SETTLE, Duration::from_millis)
+    }
+
+    fn settling() -> bool {
+        STARTED_AT.get().is_some_and(|at| at.elapsed() < extensions_settle())
+    }
+
+    /// Holds a page's address until extensions are ready; true when it was held.
+    fn hold_while_settling(id: &str, url: &str) -> bool {
+        if !settling() || url.is_empty() || url == "about:blank" {
+            return false;
+        }
+        SETTLING.with_borrow_mut(|held| {
+            held.retain(|(held_id, _)| held_id != id);
+            held.push((id.to_owned(), url.to_owned()));
+        });
+        true
+    }
+
+    fn load_settled() {
+        if settling() || SETTLING.with_borrow(Vec::is_empty) {
+            return;
+        }
+        for (id, url) in SETTLING.take() {
+            let browser = VIEWS.with(|views| views.try_borrow().ok().and_then(|views| views.get(&id).and_then(|view| view.browser.clone())));
+            if let Some(frame) = browser.and_then(|browser| browser.main_frame()) {
+                frame.load_url(Some(&CefString::from(url.as_str())));
+            }
+        }
+    }
+
     extern "C" fn pump_now(_: *mut c_void) {
         if !STARTED.get() {
             return;
@@ -558,6 +599,7 @@ mod native {
             PUMP_AGAIN.set(true);
             return;
         }
+        load_settled();
         cef::do_message_loop_work();
         IN_CEF.set(false);
         if PUMP_AGAIN.take() {
@@ -908,7 +950,10 @@ mod native {
         });
         // Creating a browser runs the message loop, which reaches back into VIEWS.
         if let Some(host) = created {
-            let url = WAITING.with_borrow_mut(|waiting| waiting.remove(id)).unwrap_or_else(|| "about:blank".to_owned());
+            let mut url = WAITING.with_borrow_mut(|waiting| waiting.remove(id)).unwrap_or_else(|| "about:blank".to_owned());
+            if hold_while_settling(id, &url) {
+                url = "about:blank".to_owned();
+            }
             let nested = IN_CEF.replace(true);
             let browser = create_browser(host, &url, width as i32, height as i32);
             IN_CEF.set(nested);
@@ -1157,6 +1202,14 @@ mod native {
             let mut holes: Vec<NsRect> = view.hole.iter().filter(|a| overlaps(a)).map(to_local).collect();
             let covered: Vec<NsRect> = covers.iter().filter(|c| overlaps(&c.area)).map(|c| to_local(&c.area)).collect();
             holes.extend(covered.iter().copied());
+            // Even-odd filling would close a hole where two meet (a mod's menu that is also a
+            // popup reports the same place twice), so holes that touch become one.
+            let holes = merge_overlapping(holes);
+            MASK_HOLES.with(|map| {
+                if let Ok(mut map) = map.try_borrow_mut() {
+                    map.insert(view.host as usize, holes.len());
+                }
+            });
             let pass_all = view.hole.is_some() || covers.iter().any(|c| c.pass_all);
             let host = &mut *view.host;
             host.set_ivar::<BOOL>("pass", if pass_all { YES } else { NO });
@@ -1183,11 +1236,30 @@ mod native {
         }
     }
 
+    fn merge_overlapping(mut rects: Vec<NsRect>) -> Vec<NsRect> {
+        let touch = |a: &NsRect, b: &NsRect| a.origin.x <= b.origin.x + b.size.w && b.origin.x <= a.origin.x + a.size.w
+            && a.origin.y <= b.origin.y + b.size.h && b.origin.y <= a.origin.y + a.size.h;
+        'again: loop {
+            for i in 0..rects.len() {
+                for j in i + 1..rects.len() {
+                    if touch(&rects[i], &rects[j]) {
+                        let (a, b) = (rects[i], rects.remove(j));
+                        let (left, bottom) = (a.origin.x.min(b.origin.x), a.origin.y.min(b.origin.y));
+                        let right = (a.origin.x + a.size.w).max(b.origin.x + b.size.w);
+                        let top = (a.origin.y + a.size.h).max(b.origin.y + b.size.h);
+                        rects[i] = NsRect { origin: Point { x: left, y: bottom }, size: Size { w: right - left, h: top - bottom } };
+                        continue 'again;
+                    }
+                }
+            }
+            return rects;
+        }
+    }
+
     /// How many holes a page shows now (a mod's popup, Herdr's popups and toasts over it).
     pub fn holes(id: &str) -> usize {
         VIEWS.with(|views| views.try_borrow().ok().and_then(|views| views.get(id).map(|view| {
-            let covered = HOST_HOLES.with(|holes| holes.borrow().get(&(view.host as usize)).map_or(0, Vec::len));
-            covered + usize::from(view.hole.is_some())
+            MASK_HOLES.with(|holes| holes.borrow().get(&(view.host as usize)).copied().unwrap_or(0))
         })).unwrap_or(0))
     }
 
@@ -1258,6 +1330,7 @@ mod native {
         });
         if let Some(browser) = browser {
             match op {
+                "navigate" if hold_while_settling(id, &normalize(arg)) => {}
                 "navigate" => {
                     if let Some(frame) = browser.main_frame() {
                         frame.load_url(Some(&CefString::from(normalize(arg).as_str())));

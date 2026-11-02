@@ -379,6 +379,9 @@ pub struct AppWindow {
     /// Mods placed once; later the layout decides where (or whether) they show.
     seen: BTreeSet<String>,
     bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// This fork: the last press landed outside the focused pane (the sidebar, the tab bar), so
+    /// the person has left it though no other pane took the focus. `focused().away`.
+    away: bool,
     drag: Option<Drag>,
     written_layout: String,
     /// The shown layout as its file has it; `chrome` is this plus the clicks
@@ -481,6 +484,7 @@ impl AppWindow {
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
             bounds: Default::default(),
+            away: false,
             drag: None,
             written_layout: String::new(),
             file_chrome: default_layout("main"),
@@ -1446,6 +1450,9 @@ impl AppWindow {
             model_pane.clone()
         };
         let pane_changed = focused != self.focused_pane;
+        if pane_changed {
+            self.away = false;
+        }
         // A pane focused some other way, or the block leaving, ends it.
         if (pane_changed && self.focused_block != focused) || self.focused_block.as_ref().is_some_and(|b| !self.mod_block_shown(b)) {
             self.focused_block = None;
@@ -1617,6 +1624,17 @@ impl AppWindow {
     }
 
     /// Tells mods what changed (they re-render only if something did).
+    /// A press in the window: away from the focused pane, or back in it.
+    fn pressed_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let inside = self.model.focused_pane()
+            .and_then(|pane| self.bounds.borrow().get(&pane).copied())
+            .is_some_and(|b| b.contains(&at));
+        if self.away != !inside {
+            self.away = !inside;
+            self.publish(cx);
+        }
+    }
+
     fn publish(&mut self, cx: &mut Context<Self>) {
         let m = &self.model;
         let home = home();
@@ -1678,7 +1696,7 @@ impl AppWindow {
             let pane = ctx.focused_pane()?;
             let cwd = (if self.shows_agent() { self.shown_agent() } else { m.address_of(&pane) }).and_then(|a| self.cwds.get(&a).cloned());
             Some(json!({ "space": p.id, "tab": ctx.id, "terminal": m.address_of(&pane), "shown": self.swapped.get(&pane),
-                "pane": pane, "agent": self.shown_agent(), "cwd": cwd }))
+                "pane": pane, "agent": self.shown_agent(), "cwd": cwd, "away": self.away }))
         });
         let machines = self.documents.iter().map(|(name, slot)| json!({
             "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
@@ -2677,6 +2695,8 @@ impl AppWindow {
                 let pane = slots.as_ref().and_then(Value::as_object)
                     .and_then(|slots| slots.iter().find(|(_, slot)| slot.to_string() == id).map(|(pane, _)| pane.clone()));
                 if let Some(pane) = pane {
+                    // A press on a page is a press in its pane, not away from it.
+                    self.away = false;
                     self.run("pane.focus", json!({ "pane": pane }), window, cx);
                 }
             }
@@ -4795,6 +4815,8 @@ impl Render for AppWindow {
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| this.run_action(a.id(), w, cx)))
+            // Whether a press left the focused pane: seen before anything under it handles it.
+            .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, _, cx| this.pressed_at(e.position, cx)))
             // Ctrl (Cmd) alone shows links in the pane under the pointer, focused or not.
             .on_modifiers_changed(cx.listener(|this, _: &ModifiersChangedEvent, _, cx| {
                 for t in this.terms.values() {
