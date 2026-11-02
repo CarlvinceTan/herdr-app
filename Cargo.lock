@@ -3679,6 +3679,7 @@ version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-channel",
+ "block",
  "cap-std",
  "cef",
  "chrono",

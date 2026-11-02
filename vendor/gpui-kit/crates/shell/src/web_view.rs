@@ -164,6 +164,8 @@ mod native {
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
+        // Popup windows open now (a site's sign-in, usually).
+        static POPUPS: RefCell<Vec<Browser>> = const { RefCell::new(Vec::new()) };
         static GPUI_VIEW: Cell<Id> = const { Cell::new(std::ptr::null_mut()) };
         // The page that had the keyboard when a popup or dialog took it, to get it back after.
         static HELD_KEYS: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -356,7 +358,9 @@ mod native {
         struct PagePopups;
 
         impl LifeSpanHandler {
-            // Links that ask for a new window open in this one.
+            // A script's popup (a sign-in, usually), or one opened blank to be filled in later, gets a
+            // window of its own and keeps its tie to the page that opened it, which waits to hear back
+            // from it. Links that only ask for a new tab open in this pane.
             #[allow(clippy::too_many_arguments)]
             fn on_before_popup(
                 &self,
@@ -365,19 +369,43 @@ mod native {
                 _popup_id: ::std::os::raw::c_int,
                 target_url: Option<&CefString>,
                 _target_frame_name: Option<&CefString>,
-                _target_disposition: WindowOpenDisposition,
+                target_disposition: WindowOpenDisposition,
                 _user_gesture: ::std::os::raw::c_int,
                 _popup_features: Option<&PopupFeatures>,
-                _window_info: Option<&mut WindowInfo>,
+                window_info: Option<&mut WindowInfo>,
                 _client: Option<&mut Option<Client>>,
                 _settings: Option<&mut BrowserSettings>,
                 _extra_info: Option<&mut Option<DictionaryValue>>,
                 _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
             ) -> ::std::os::raw::c_int {
+                let url = target_url.map(CefString::to_string).unwrap_or_default();
+                let blank = url.is_empty() || url == "about:blank";
+                if blank || target_disposition.as_ref() == WindowOpenDisposition::NEW_POPUP.as_ref() {
+                    if let Some(info) = window_info {
+                        info.runtime_style = RuntimeStyle::ALLOY;
+                    }
+                    return 0;
+                }
                 if let Some(frame) = browser.and_then(|browser| browser.main_frame()) {
                     frame.load_url(target_url);
                 }
                 1
+            }
+
+            fn on_after_created(&self, browser: Option<&mut Browser>) {
+                if let Some(browser) = browser.filter(|browser| browser.is_popup() != 0) {
+                    POPUPS.with_borrow_mut(|popups| popups.push(browser.clone()));
+                    if let Some(host) = browser.host() {
+                        center_on_herdr(host.window_handle() as Id);
+                    }
+                }
+            }
+
+            fn on_before_close(&self, browser: Option<&mut Browser>) {
+                if let Some(browser) = browser {
+                    let id = browser.identifier();
+                    POPUPS.with_borrow_mut(|popups| popups.retain(|popup| popup.identifier() != id));
+                }
             }
         }
     }
@@ -705,8 +733,12 @@ mod native {
             }
         }
         VIEWS.take().values().for_each(close_page);
+        for host in POPUPS.with_borrow(|popups| popups.iter().filter_map(|popup| popup.host()).collect::<Vec<_>>()) {
+            host.close_browser(1);
+        }
+        let open = || !chrome_windows().is_empty() || POPUPS.with_borrow(|popups| !popups.is_empty());
         let deadline = Instant::now() + CHROME_WINDOWS_CLOSE;
-        while !chrome_windows().is_empty() && Instant::now() < deadline {
+        while open() && Instant::now() < deadline {
             cef::do_message_loop_work();
             unsafe {
                 let pool: Id = msg_send![class!(NSAutoreleasePool), new];
@@ -717,7 +749,7 @@ mod native {
             }
         }
         // Better to skip Chromium's shutdown than crash in it; the cookies are already written.
-        if chrome_windows().is_empty() {
+        if !open() {
             cef::shutdown();
         } else {
             tracing::warn!("web view: a Chromium window wouldn't close; quitting without its shutdown");
@@ -761,6 +793,28 @@ mod native {
     }
 
     // The app's windows that Chromium opened itself (views widgets), not Herdr's own.
+    // A popup opens over the middle of Herdr's window, not wherever the site asked.
+    fn center_on_herdr(view: Id) {
+        let gpui = GPUI_VIEW.get();
+        if view.is_null() || gpui.is_null() {
+            return;
+        }
+        unsafe {
+            let window: Id = msg_send![view, window];
+            let main: Id = msg_send![gpui, window];
+            if window.is_null() || main.is_null() || window == main {
+                return;
+            }
+            let area: NsRect = msg_send![main, frame];
+            let frame: NsRect = msg_send![window, frame];
+            let origin = Point {
+                x: area.origin.x + (area.size.w - frame.size.w) / 2.0,
+                y: area.origin.y + (area.size.h - frame.size.h) / 2.0,
+            };
+            let _: () = msg_send![window, setFrameOrigin: origin];
+        }
+    }
+
     fn chrome_windows() -> Vec<Id> {
         unsafe {
             let app: Id = msg_send![class!(NSApplication), sharedApplication];
@@ -783,6 +837,7 @@ mod native {
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
         let gpui_view = handle.ns_view.as_ptr() as Id;
         GPUI_VIEW.set(gpui_view);
+        watch_presses();
         let (left, top) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
         let (width, height) = (f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)));
         let (space, parent) = unsafe {
@@ -878,6 +933,48 @@ mod native {
             let _: BOOL = msg_send![window, makeFirstResponder: host.window_handle() as Id];
         }
         host.set_focus(1);
+    }
+
+    // A press anywhere in Herdr outside a page (a tab being renamed, a field in the sidebar or a popup)
+    // takes the keyboard back from the page, as moving to another pane does. A press on a page is
+    // the page's. Pane focus alone misses these: renaming a tab leaves the browser pane focused.
+    fn watch_presses() {
+        static WATCHING: Once = Once::new();
+        WATCHING.call_once(|| {
+            const PRESSES: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+            let handler = block::ConcreteBlock::new(|event: Id| -> Id {
+                // Never mid-change of the pages (a panic here would end the app).
+                if event.is_null() || VIEWS.with(|views| views.try_borrow().is_err()) {
+                    return event;
+                }
+                unsafe {
+                    let gpui = GPUI_VIEW.get();
+                    let window: Id = msg_send![event, window];
+                    let main: Id = if gpui.is_null() { NIL } else { msg_send![gpui, window] };
+                    if !window.is_null() && window == main {
+                        let content: Id = msg_send![window, contentView];
+                        let point: Point = msg_send![event, locationInWindow];
+                        let hit: Id = msg_send![content, hitTest: point];
+                        let on_page = !hit.is_null() && VIEWS.with_borrow(|views| views.values().any(|view| {
+                            let inside: BOOL = msg_send![hit, isDescendantOf: view.host];
+                            inside == YES
+                        }));
+                        if !on_page {
+                            take_keys_back();
+                        }
+                    }
+                }
+                event
+            }).copy();
+            unsafe {
+                let monitor: Id = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: PRESSES handler: &*handler];
+                if !monitor.is_null() {
+                    let _: Id = msg_send![monitor, retain];
+                }
+            }
+            // The monitor holds the block for as long as the app runs.
+            std::mem::forget(handler);
+        });
     }
 
     fn apply_visibility() {

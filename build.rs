@@ -39,6 +39,14 @@ fn main() {
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");
     embed(&base, "defaults/frame", "FRAME_MODS", "frame_mods.rs");
 
+    // The autofill helper carries an identity of its own, so Touch ID asks as "Herdr", not as the
+    // helper's file name.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let plist = base.join("assets/autofill-host-Info.plist");
+        println!("cargo:rerun-if-changed={}", plist.display());
+        println!("cargo:rustc-link-arg-bin=herdr-autofill-host=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
+    }
+
     // Windows takes the window, taskbar and Start menu icon from the program file.
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

@@ -330,6 +330,7 @@
     if (pending && "username" in pending) showOffer(pending);
   }
 
+  // The offer: what was typed, in fields that can be corrected before saving.
   function showOffer(pending) {
     const host = document.createElement("herdr-autofill-save");
     const root = host.attachShadow({ mode: "closed" });
@@ -340,26 +341,40 @@
         padding: 12px 12px 10px 14px; border-radius: 10px; background: #ffffff; color: #1f2328; border: 1px solid #d8dbe0;
         box-shadow: 0 10px 28px rgba(0,0,0,.18); font: 13px/1.4 -apple-system, system-ui, sans-serif; transition: opacity .25s; }
       .title { font-weight: 600; padding-right: 22px; }
-      .who { opacity: .7; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .site { opacity: .65; font-size: 12px; margin-bottom: 8px; }
+      .field { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+      .field label { width: 64px; flex: none; opacity: .7; font-size: 12px; }
+      input { flex: 1; min-width: 0; font: inherit; color: inherit; background: transparent; border: 1px solid #d8dbe0;
+        border-radius: 6px; padding: 3px 6px; outline: none; }
+      input:focus { border-color: #3b82f6; }
+      .show { font-size: 12px; padding: 2px 6px; }
       .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
       button { font: inherit; border-radius: 6px; padding: 4px 12px; cursor: default; border: 1px solid #d8dbe0; background: transparent; color: inherit; }
       .save { background: #3b82f6; border-color: #3b82f6; color: #fff; }
       .close { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0; border: none; font-size: 16px; line-height: 20px; opacity: .55; }
       .close:hover { opacity: 1; }
+      .note { opacity: .7; }
       @media (prefers-color-scheme: dark) {
         .toast { background: #2b2f36; color: #dcdfe4; border-color: #3d424b; box-shadow: 0 10px 28px rgba(0,0,0,.45); }
-        button { border-color: #474d57; } .save { background: #2f6fde; border-color: #2f6fde; }
+        input, button { border-color: #474d57; } input:focus { border-color: #2f6fde; } .save { background: #2f6fde; border-color: #2f6fde; }
       }`;
-    const box = document.createElement("div");
-    box.className = "toast";
-    const make = (tag, className, text) => Object.assign(document.createElement(tag), { className, textContent: text });
-    const close = make("button", "close", "\u00d7");
-    const later = make("button", "later", "Not now");
-    const save = make("button", "save", pending.update ? "Update" : "Save");
-    const actions = make("div", "actions", "");
+    const make = (tag, props) => Object.assign(document.createElement(tag), props);
+    const box = make("div", { className: "toast" });
+    const close = make("button", { className: "close", textContent: "\u00d7", title: "Close" });
+    const user = make("input", { className: "user", value: pending.username ?? "", placeholder: "No username", spellcheck: false });
+    const pass = make("input", { className: "pass", type: "password", value: pending.password ?? "" });
+    const show = make("button", { className: "show", textContent: "Show" });
+    const later = make("button", { className: "later", textContent: "Not now" });
+    const save = make("button", { className: "save", textContent: pending.update ? "Update" : "Save" });
+    const field = (name, ...children) => {
+      const row = make("div", { className: "field" });
+      row.append(make("label", { textContent: name }), ...children);
+      return row;
+    };
+    const actions = make("div", { className: "actions" });
     actions.append(later, save);
-    box.append(close, make("div", "title", pending.update ? "Update the saved password?" : "Save this password?"),
-      make("div", "who", `${pending.username || "No username"} \u00b7 ${location.hostname}`), actions);
+    box.append(close, make("div", { className: "title", textContent: pending.update ? "Update the saved password?" : "Save this password?" }),
+      make("div", { className: "site", textContent: location.hostname }), field("Username", user), field("Password", pass, show), actions);
     root.append(style, box);
     document.documentElement.append(host);
     offer = { host, timer: null };
@@ -371,24 +386,34 @@
       offer = null;
       if (dismiss) ask({ type: "dismiss" });
     };
-    const soon = () => { clearTimeout(offer?.timer); if (offer) offer.timer = setTimeout(() => away(), OFFER_SHOWN); };
+    // It fades by itself, but not while the pointer is on it or a field is being edited.
+    const soon = () => {
+      clearTimeout(offer?.timer);
+      if (offer && !box.matches(":hover") && !root.activeElement) offer.timer = setTimeout(() => away(), OFFER_SHOWN);
+    };
     box.addEventListener("mouseenter", () => clearTimeout(offer?.timer));
     box.addEventListener("mouseleave", soon);
+    box.addEventListener("focusin", () => clearTimeout(offer?.timer));
+    box.addEventListener("focusout", () => setTimeout(soon, 0));
     close.addEventListener("click", (e) => e.isTrusted && away());
     later.addEventListener("click", (e) => e.isTrusted && away());
-    save.addEventListener("click", async (e) => {
+    show.addEventListener("click", (e) => {
       if (!e.isTrusted) return;
+      pass.type = pass.type === "password" ? "text" : "password";
+      show.textContent = pass.type === "password" ? "Show" : "Hide";
+    });
+    const store = async () => {
       clearTimeout(offer?.timer);
       save.disabled = later.disabled = true;
-      const got = await ask({ type: "save" });
-      actions.replaceChildren(make("div", "who", got?.saved ? "Saved to your vault" : "Couldn\u2019t save it"));
+      const got = await ask({ type: "save", username: user.value.trim(), password: pass.value });
+      actions.replaceChildren(make("div", { className: "note", textContent: got?.saved ? "Saved to your vault" : "Couldn\u2019t save it" }));
       setTimeout(() => away(false), 1_800);
-    });
-    // Where the buttons are, for tests that press them as a person would.
-    requestAnimationFrame(() => {
-      const at = (el) => { const r = el.getBoundingClientRect(); return `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`; };
-      Object.assign(host.dataset, { save: at(save), later: at(later), close: at(close) });
-    });
+    };
+    save.addEventListener("click", (e) => e.isTrusted && store());
+    for (const input of [user, pass]) input.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.isTrusted) store(); });
+    // Where the controls are, for tests that press them as a person would.
+    const at = (el) => { const r = el.getBoundingClientRect(); return `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`; };
+    Object.assign(host.dataset, { save: at(save), later: at(later), close: at(close), user: at(user), pass: at(pass) });
     soon();
   }
 
