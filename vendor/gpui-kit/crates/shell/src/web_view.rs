@@ -163,6 +163,9 @@ mod native {
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
+        static GPUI_VIEW: Cell<Id> = const { Cell::new(std::ptr::null_mut()) };
+        // The page that had the keyboard when a popup or dialog took it, to get it back after.
+        static HELD_KEYS: RefCell<Option<String>> = const { RefCell::new(None) };
         static LAST_SEAL: Cell<Option<Instant>> = const { Cell::new(None) };
         static PUMP_AGAIN: Cell<bool> = const { Cell::new(false) };
         // Addresses sent before their page's view has drawn.
@@ -173,6 +176,29 @@ mod native {
     fn state_dir() -> PathBuf {
         std::env::var("HERDR_BROWSER_STATE").map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/herdr-browser"))
+    }
+
+    // New sites open at the app's zoom, not at 100% until a page is told otherwise, which showed as
+    // a jump on each new site. Chromium won't take this preference at runtime, so it goes into the
+    // profile before start. "x" is its key for the profile's default partition.
+    fn seed_default_zoom(cache: &std::path::Path) {
+        let path = cache.join("Default/Preferences");
+        let mut prefs: serde_json::Value = std::fs::read_to_string(&path).ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let level = zoom_level(DEFAULT_ZOOM);
+        if prefs.pointer("/partition/default_zoom_level/x").and_then(|v| v.as_f64()) == Some(level) {
+            return;
+        }
+        let Some(root) = prefs.as_object_mut() else { return };
+        let partition = root.entry("partition").or_insert_with(|| serde_json::json!({}));
+        if let Some(partition) = partition.as_object_mut() {
+            partition.insert("default_zoom_level".into(), serde_json::json!({ "x": level }));
+        }
+        let _ = std::fs::create_dir_all(cache.join("Default"));
+        if let Err(e) = std::fs::write(&path, prefs.to_string()) {
+            tracing::warn!("web view: default zoom not written: {e}");
+        }
     }
 
     // Chromium names an extension loaded from a folder after that folder's real path.
@@ -209,12 +235,14 @@ mod native {
                 switch("process-per-site", None);
                 switch("disable-background-networking", None);
                 switch("disable-notifications", None);
+                // Chromium opens no window of its own, not even to offer "Restore pages?" after a crash.
+                switch("no-startup-window", None);
+                switch("hide-crash-restore-bubble", None);
                 switch("disable-features", Some(LEAN_FEATURES_OFF));
                 let ublock = state_dir().join("ublock");
                 if ublock.join("manifest.json").exists() {
                     let path = CefString::from(ublock.to_string_lossy().as_ref());
                     line.append_switch_with_value(Some(&CefString::from("load-extension")), Some(&path));
-                    line.append_switch_with_value(Some(&CefString::from("disable-extensions-except")), Some(&path));
                 }
             }
         }
@@ -226,6 +254,11 @@ mod native {
         impl BrowserProcessHandler {
             fn on_schedule_message_pump_work(&self, delay_ms: i64) {
                 schedule(delay_ms);
+            }
+
+            // Another launch on this profile would otherwise open a Chrome window here.
+            fn on_already_running_app_relaunch(&self, _command_line: Option<&mut CommandLine>, _current_directory: Option<&CefString>) -> ::std::os::raw::c_int {
+                1
             }
         }
     }
@@ -295,6 +328,7 @@ mod native {
             LIBRARY.with_borrow_mut(|library| *library = Some(loader));
             let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
             let cache = state_dir().join("cef");
+            seed_default_zoom(&cache);
             let cache = CefString::from(cache.to_string_lossy().as_ref());
             let settings = Settings {
                 no_sandbox: 1,
@@ -530,6 +564,14 @@ mod native {
         }
     }
 
+    // Chrome's own pages for extensions (managing them, the Web Store's install prompt) need its full
+    // UI, which a page in a pane doesn't have. They open in a Chrome window on the same profile.
+    fn open_chrome_window(url: &str) {
+        let info = WindowInfo { runtime_style: RuntimeStyle::CHROME, ..Default::default() };
+        let mut client = PageClient::new();
+        cef::browser_host_create_browser(Some(&info), Some(&mut client), Some(&CefString::from(url)), Some(&BrowserSettings::default()), None, None);
+    }
+
     fn create_browser(host: Id, url: &str, width: i32, height: i32) -> Option<Browser> {
         let bounds = CefRect { x: 0, y: 0, width, height };
         let info = WindowInfo { runtime_style: RuntimeStyle::ALLOY, ..Default::default() }
@@ -590,6 +632,7 @@ mod native {
         let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
         let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
         let gpui_view = handle.ns_view.as_ptr() as Id;
+        GPUI_VIEW.set(gpui_view);
         let (left, top) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
         let (width, height) = (f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)));
         let (space, parent) = unsafe {
@@ -636,8 +679,65 @@ mod native {
         apply_visibility();
     }
 
+    // AppKit sends keys to the view holding first responder, and a page keeps it after Herdr's own
+    // focus has moved on. These move it between the app's view and a page.
+    fn page_with_keys() -> Option<String> {
+        let gpui = GPUI_VIEW.get();
+        if gpui.is_null() {
+            return None;
+        }
+        unsafe {
+            let window: Id = msg_send![gpui, window];
+            let responder: Id = if window.is_null() { NIL } else { msg_send![window, firstResponder] };
+            if responder.is_null() {
+                return None;
+            }
+            let is_view: BOOL = msg_send![responder, isKindOfClass: class!(NSView)];
+            if is_view == NO {
+                return None;
+            }
+            VIEWS.with_borrow(|views| {
+                views.iter().find(|(_, view)| {
+                    let inside: BOOL = msg_send![responder, isDescendantOf: view.host];
+                    inside == YES
+                }).map(|(id, _)| id.clone())
+            })
+        }
+    }
+
+    fn take_keys_back() {
+        let Some(id) = page_with_keys() else { return };
+        unsafe {
+            let window: Id = msg_send![GPUI_VIEW.get(), window];
+            let _: BOOL = msg_send![window, makeFirstResponder: GPUI_VIEW.get()];
+        }
+        if let Some(host) = VIEWS.with_borrow(|views| views.get(&id).and_then(|view| view.browser.clone())).and_then(|browser| browser.host()) {
+            host.set_focus(0);
+        }
+    }
+
+    fn give_keys(id: &str) {
+        let page = VIEWS.with_borrow(|views| {
+            let view = views.get(id)?;
+            let holed: BOOL = unsafe { *(*view.host).get_ivar("pass") };
+            (view.shown && holed == NO).then(|| view.browser.clone()).flatten()
+        });
+        let (Some(host), false, false) = (page.and_then(|browser| browser.host()), GPUI_VIEW.get().is_null(), SUSPENDED.get()) else { return };
+        unsafe {
+            let window: Id = msg_send![GPUI_VIEW.get(), window];
+            let _: BOOL = msg_send![window, makeFirstResponder: host.window_handle() as Id];
+        }
+        host.set_focus(1);
+    }
+
     fn apply_visibility() {
         let suspended = SUSPENDED.get();
+        // A hidden page mustn't keep the keyboard.
+        if let Some(id) = page_with_keys()
+            && (suspended || VIEWS.with_borrow(|views| views.get(&id).is_some_and(|view| !view.shown)))
+        {
+            take_keys_back();
+        }
         VIEWS.with_borrow(|views| {
             for view in views.values() {
                 let hidden: BOOL = if view.shown && !suspended { NO } else { YES };
@@ -650,8 +750,16 @@ mod native {
 
     /// Dialogs dim the whole window from beneath this view, so pages step aside for them.
     pub fn set_suspended(suspended: bool) {
-        if SUSPENDED.replace(suspended) != suspended {
-            apply_visibility();
+        if SUSPENDED.get() == suspended {
+            return;
+        }
+        if suspended {
+            HELD_KEYS.with_borrow_mut(|held| *held = page_with_keys());
+        }
+        SUSPENDED.set(suspended);
+        apply_visibility();
+        if !suspended && let Some(id) = HELD_KEYS.take() {
+            give_keys(&id);
         }
     }
 
@@ -755,6 +863,19 @@ mod native {
     }
 
     pub fn command(id: &str, op: &str, arg: &str) {
+        match op {
+            "blur" => return take_keys_back(),
+            "extensions" => return open_chrome_window("chrome://extensions"),
+            "focus" => return give_keys(id),
+            // A popup over the page (its address, its menu) takes the keyboard while it's open.
+            "hole" if arg.split_whitespace().count() == 4 => {
+                if let Some(page) = page_with_keys() {
+                    HELD_KEYS.with_borrow_mut(|held| *held = Some(page));
+                    take_keys_back();
+                }
+            }
+            _ => {}
+        }
         if op == "remove" {
             if let Some(view) = VIEWS.with_borrow_mut(|views| views.remove(id)) {
                 close_page(&view);
@@ -793,7 +914,13 @@ mod native {
                         frame.load_url(Some(&CefString::from(format!("chrome-extension://{id}/dashboard.html").as_str())));
                     }
                 }
-                "zoom" | "clear-data" | "hole" | "show" | "hide" => {}
+                "hole" => {
+                    if arg.trim().is_empty() && HELD_KEYS.with_borrow(|held| held.as_deref() == Some(id)) {
+                        HELD_KEYS.take();
+                        give_keys(id);
+                    }
+                }
+                "zoom" | "clear-data" | "show" | "hide" => {}
                 other => tracing::warn!("web view: unknown command {other:?}"),
             }
         }

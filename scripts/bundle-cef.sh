@@ -33,14 +33,22 @@ $3
 PLIST
 }
 
-plist Herdr "$id" "<key>CFBundleIconFile</key><string>Herdr</string>" > "$app/Contents/Info.plist"
+# Without these, macOS ends the app the moment a page touches one (a phone passkey uses Bluetooth).
+usage='<key>NSBluetoothAlwaysUsageDescription</key><string>Web pages in browser panes use Bluetooth for passkeys on your phone and for security keys.</string>
+<key>NSCameraUsageDescription</key><string>Web pages in browser panes can ask to use the camera.</string>
+<key>NSMicrophoneUsageDescription</key><string>Web pages in browser panes can ask to use the microphone.</string>
+<key>NSLocationUsageDescription</key><string>Web pages in browser panes can ask for your location.</string>
+<key>NSLocationWhenInUseUsageDescription</key><string>Web pages in browser panes can ask for your location.</string>'
+plist Herdr "$id" "<key>CFBundleIconFile</key><string>Herdr</string>
+$usage" > "$app/Contents/Info.plist"
 cp "$root/assets/icons/Herdr.icns" "$app/Contents/Resources/"
 for suffix in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
   name="Herdr Helper$suffix"
   helper="$app/Contents/Frameworks/$name.app"
   mkdir -p "$helper/Contents/MacOS"
   cp "$root/target/$profile/herdr-cef-helper" "$helper/Contents/MacOS/$name"
-  plist "$name" "$id.helper$(echo "$suffix" | tr -d ' ()' | tr '[:upper:]' '[:lower:]')" "<key>LSUIElement</key><true/>" > "$helper/Contents/Info.plist"
+  plist "$name" "$id.helper$(echo "$suffix" | tr -d ' ()' | tr '[:upper:]' '[:lower:]')" "<key>LSUIElement</key><true/>
+$usage" > "$helper/Contents/Info.plist"
 done
 # Signed for this computer, helpers before the app that holds them. Herdr's script engine needs JIT.
 sign() { codesign --force --sign - --entitlements "$root/scripts/macos-entitlements.plist" --timestamp=none "$1"; }
