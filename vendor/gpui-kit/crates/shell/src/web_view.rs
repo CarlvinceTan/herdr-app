@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{command, on_click, pages, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, holes, on_click, pages, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -63,6 +63,9 @@ mod native {
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
     pub fn set_suspended(_: bool) {}
     pub fn set_undrawn(_: std::collections::HashSet<String>) {}
+    pub fn begin_covers(_: bool) {}
+    pub fn cover(_: Bounds<Pixels>, _: bool) {}
+    pub fn holes(_: &str) -> usize { 0 }
 }
 
 #[cfg(target_os = "macos")]
@@ -155,6 +158,17 @@ mod native {
         top: f64,
         left: f64,
         asked: u64,
+        // A mod's popup over the page (its address, its menu): x, y, width, height in the window.
+        hole: Option<[f64; 4]>,
+    }
+
+    /// Herdr's own popups and toasts over pages, in window coordinates: the page shows a hole
+    /// where each one is. While a popup is open every page lets presses through, so a press on a
+    /// page closes the popup as it would anywhere else; a toast lets through only its own.
+    #[derive(Clone, Copy, PartialEq)]
+    struct Cover {
+        area: [f64; 4],
+        pass_all: bool,
     }
 
     thread_local! {
@@ -166,6 +180,10 @@ mod native {
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
         static UNDRAWN: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+        static COVERS: RefCell<Vec<Cover>> = const { RefCell::new(Vec::new()) };
+        static APPLIED_COVERS: RefCell<Vec<Cover>> = const { RefCell::new(Vec::new()) };
+        // Each host's holes, in its own coordinates, for presses to pass through (by host pointer).
+        static HOST_HOLES: RefCell<HashMap<usize, Vec<NsRect>>> = RefCell::new(HashMap::new());
         // Popup windows open now (a site's sign-in, usually).
         static POPUPS: RefCell<Vec<Browser>> = const { RefCell::new(Vec::new()) };
         static GPUI_VIEW: Cell<Id> = const { Cell::new(std::ptr::null_mut()) };
@@ -575,6 +593,17 @@ mod native {
             if pass != NO {
                 return NIL;
             }
+            let superview: Id = msg_send![this as *mut Object, superview];
+            let local: Point = msg_send![this as *mut Object, convertPoint: point fromView: superview];
+            let key = this as *mut Object as usize;
+            let in_hole = HOST_HOLES.with(|holes| holes.try_borrow().is_ok_and(|holes| {
+                holes.get(&key).is_some_and(|rects| rects.iter().any(|r| {
+                    local.x >= r.origin.x && local.x <= r.origin.x + r.size.w && local.y >= r.origin.y && local.y <= r.origin.y + r.size.h
+                }))
+            }));
+            if in_hole {
+                return NIL;
+            }
             let found: Id = msg_send![super(this, class!(NSView)), hitTest: point];
             if !found.is_null() {
                 report_click(this as *mut Object);
@@ -866,6 +895,7 @@ mod native {
                 top: 0.0,
                 left: 0.0,
                 asked: 0,
+                hole: None,
             });
             view.top = top;
             view.left = left;
@@ -873,6 +903,7 @@ mod native {
             unsafe {
                 let _: () = msg_send![view.host, setFrame: frame];
             }
+            apply_mask(view);
             if view.browser.is_none() && width > 0.0 && height > 0.0 { Some(view.host) } else { None }
         });
         // Creating a browser runs the message loop, which reaches back into VIEWS.
@@ -1103,31 +1134,90 @@ mod native {
     }
 
     // Popups draw beneath this view, so while one is open it cuts a hole for it.
-    unsafe fn set_hole(view: &View, area: &str) {
+    fn set_hole(view: &mut View, area: &str) {
+        let parts: Vec<f64> = area.split_whitespace().filter_map(|part| part.parse().ok()).collect();
+        view.hole = (parts.len() == 4).then(|| [parts[0], parts[1], parts[2], parts[3]]);
+        apply_mask(view);
+    }
+
+    /// Cuts the page's holes (a mod's popup, Herdr's popups and toasts over it) out of its picture,
+    /// and says which presses pass through to Herdr.
+    fn apply_mask(view: &View) {
+        // The last whole frame's covers: this frame's are still being collected while pages place.
+        let covers = APPLIED_COVERS.with(|covers| covers.try_borrow().map(|c| c.clone()).unwrap_or_default());
         unsafe {
-            let parts: Vec<f64> = area.split_whitespace().filter_map(|part| part.parse().ok()).collect();
-            let active = parts.len() == 4;
+            let bounds: NsRect = msg_send![view.host, bounds];
+            let (width, height) = (bounds.size.w, bounds.size.h);
+            let overlaps = |a: &[f64; 4]| a[2] > 0.0 && a[3] > 0.0 && a[0] < view.left + width && a[0] + a[2] > view.left
+                && a[1] < view.top + height && a[1] + a[3] > view.top;
+            let to_local = |a: &[f64; 4]| NsRect {
+                origin: Point { x: a[0] - view.left, y: height - (a[1] - view.top) - a[3] },
+                size: Size { w: a[2], h: a[3] },
+            };
+            let mut holes: Vec<NsRect> = view.hole.iter().filter(|a| overlaps(a)).map(to_local).collect();
+            let covered: Vec<NsRect> = covers.iter().filter(|c| overlaps(&c.area)).map(|c| to_local(&c.area)).collect();
+            holes.extend(covered.iter().copied());
+            let pass_all = view.hole.is_some() || covers.iter().any(|c| c.pass_all);
             let host = &mut *view.host;
-            host.set_ivar::<BOOL>("pass", if active { YES } else { NO });
+            host.set_ivar::<BOOL>("pass", if pass_all { YES } else { NO });
+            HOST_HOLES.with(|map| {
+                if let Ok(mut map) = map.try_borrow_mut() {
+                    map.insert(view.host as usize, covered);
+                }
+            });
             let layer: Id = msg_send![view.host, layer];
-            if !active || parts[2] <= 0.0 || parts[3] <= 0.0 {
+            if holes.is_empty() {
                 let _: () = msg_send![layer, setMask: NIL];
                 return;
             }
-            let bounds: NsRect = msg_send![view.host, bounds];
-            let hole = NsRect {
-                origin: Point { x: parts[0] - view.left, y: bounds.size.h - (parts[1] - view.top) - parts[3] },
-                size: Size { w: parts[2], h: parts[3] },
-            };
             let path = CGPathCreateMutable();
             CGPathAddRect(path, std::ptr::null(), bounds);
-            CGPathAddRoundedRect(path, std::ptr::null(), hole, HOLE_RADIUS, HOLE_RADIUS);
+            for hole in &holes {
+                CGPathAddRoundedRect(path, std::ptr::null(), *hole, HOLE_RADIUS, HOLE_RADIUS);
+            }
             let mask: Id = msg_send![class!(CAShapeLayer), layer];
             let _: () = msg_send![mask, setPath: path];
             let _: () = msg_send![mask, setFillRule: kCAFillRuleEvenOdd];
             let _: () = msg_send![layer, setMask: mask];
             CGPathRelease(path);
         }
+    }
+
+    /// How many holes a page shows now (a mod's popup, Herdr's popups and toasts over it).
+    pub fn holes(id: &str) -> usize {
+        VIEWS.with(|views| views.try_borrow().ok().and_then(|views| views.get(id).map(|view| {
+            let covered = HOST_HOLES.with(|holes| holes.borrow().get(&(view.host as usize)).map_or(0, Vec::len));
+            covered + usize::from(view.hole.is_some())
+        })).unwrap_or(0))
+    }
+
+    /// The start of a frame's covers; `expected`: whether any popup or toast will report one.
+    pub fn begin_covers(expected: bool) {
+        COVERS.with(|covers| covers.borrow_mut().clear());
+        if !expected {
+            apply_covers();
+        }
+    }
+
+    /// A popup or toast drawn at `bounds` this frame (window coordinates).
+    pub fn cover(bounds: Bounds<Pixels>, pass_all: bool) {
+        let area = [f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)),
+            f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height))];
+        COVERS.with(|covers| covers.borrow_mut().push(Cover { area, pass_all }));
+        apply_covers();
+    }
+
+    fn apply_covers() {
+        let now = COVERS.with(|covers| covers.borrow().clone());
+        if APPLIED_COVERS.with(|applied| *applied.borrow() == now) {
+            return;
+        }
+        APPLIED_COVERS.set(now);
+        VIEWS.with(|views| {
+            if let Ok(views) = views.try_borrow() {
+                views.values().for_each(apply_mask);
+            }
+        });
     }
 
     pub fn command(id: &str, op: &str, arg: &str) {
@@ -1159,7 +1249,7 @@ mod native {
             match op {
                 "zoom" => zoom(view, arg),
                 "clear-data" => clear_data(view),
-                "hole" => unsafe { set_hole(view, arg) },
+                "hole" => set_hole(view, arg),
                 "show" => view.shown = true,
                 "hide" => view.shown = false,
                 _ => {}

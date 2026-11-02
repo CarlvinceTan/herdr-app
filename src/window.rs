@@ -2660,7 +2660,10 @@ impl AppWindow {
             }
             "web.report" => {
                 let pages = gpui_shell::web_view::pages().into_iter()
-                    .map(|(id, url, title, asked, shown)| (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown })))
+                    .map(|(id, url, title, asked, shown)| {
+                        let holes = gpui_shell::web_view::holes(&id);
+                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes }))
+                    })
                     .collect::<serde_json::Map<String, Value>>();
                 let pages = Value::Object(pages);
                 if crate::mods::shared("web.pages").as_ref() != Some(&pages) {
@@ -4230,6 +4233,8 @@ impl AppWindow {
         // Welcome, Feedback). Popups cut their own hole in it instead.
         gpui_shell::web_view::set_suspended(self.overlays.iter().any(|o| matches!(o.kind, OverlayKind::Dialog | OverlayKind::Window)));
         gpui_shell::web_view::set_undrawn(self.undrawn_pages());
+        // Popups and toasts report where layout puts them, and pages under them show a hole there.
+        gpui_shell::web_view::begin_covers(self.overlays.iter().any(|o| matches!(o.kind, OverlayKind::Popup | OverlayKind::Toast)));
         let mut toast_y = 16.0;
         // Drawn last, so it stays clickable over an open dialog.
         let pill = self.render_update_pill(cx);
@@ -4262,7 +4267,8 @@ impl AppWindow {
                 // Scroll, hover and cursor stop here, not on the pane behind.
                 .occlude()
                 .when(o.kind != OverlayKind::Window, |d| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
-                .child(content);
+                .child(content)
+                .when(matches!(o.kind, OverlayKind::Popup | OverlayKind::Toast), |d| d.child(cover_mark(o.kind == OverlayKind::Popup)));
             match o.kind {
                 OverlayKind::Window => out.push(self.render_window(o, body, viewport, cx)),
                 OverlayKind::Dialog => out.push(
@@ -4453,6 +4459,16 @@ fn nearest(cur: Bounds<Pixels>, dir: &str, candidates: impl IntoIterator<Item = 
         })
         .reduce(|best, next| if cmp(next.0, best.0).then(best.1.cmp(&next.1)).then(cmp(best.2, next.2)).is_lt() { next } else { best })
         .map(|(_, _, _, id)| id)
+}
+
+/// Reports where layout put a popup or toast (its parent's whole box), so web pages under it
+/// show a hole there; `pass_all`: presses on pages pass to Herdr while it's open.
+fn cover_mark(pass_all: bool) -> impl IntoElement {
+    canvas(move |bounds, _, _| gpui_shell::web_view::cover(bounds, pass_all), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
 }
 
 fn position_popup(at: Point<Pixels>, body: Stateful<Div>) -> Anchored {

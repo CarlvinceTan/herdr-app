@@ -3613,14 +3613,36 @@ fn is_drag_from_this_window(this: &Object, dragging_info: id) -> bool {
     std::ptr::eq(source as *const Object, this as *const Object)
 }
 
+// HERDR (temporary): what a drag into the window carries and whether it was taken, in
+// ~/Library/Logs/Herdr/drops.log, to find why some drops don't land. Types and counts only.
+fn note_drag(what: &str, dragging_info: id, detail: &str) {
+    let types: Vec<String> = unsafe {
+        let pasteboard: id = msg_send![dragging_info, draggingPasteboard];
+        let types: id = msg_send![pasteboard, types];
+        if types == nil {
+            Vec::new()
+        } else {
+            types.iter().map(|t| CStr::from_ptr(NSString::UTF8String(t)).to_string_lossy().into_owned()).collect()
+        }
+    };
+    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Logs/Herdr");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("drops.log")) {
+        use std::io::Write as _;
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = writeln!(file, "{at} {what} {detail} types={}", types.join(","));
+    }
+}
+
 extern "C" fn dragging_entered(this: &Object, _: Sel, dragging_info: id) -> NSDragOperation {
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
     let paths = external_paths_from_event(dragging_info);
-    if let Some(event) = paths.map(|paths| FileDropEvent::Entered { position, paths })
-        && send_file_drop_event(window_state, event)
-    {
+    let count = paths.as_ref().map_or(0, |paths| paths.paths().len());
+    let taken = paths.map(|paths| FileDropEvent::Entered { position, paths }).is_some_and(|event| send_file_drop_event(window_state, event));
+    note_drag("entered", dragging_info, &format!("paths={count} taken={taken}"));
+    if taken {
         if is_source_window {
             return NSDragOperationMove;
         }
@@ -3652,7 +3674,9 @@ extern "C" fn dragging_exited(this: &Object, _: Sel, _: id) {
 extern "C" fn perform_drag_operation(this: &Object, _: Sel, dragging_info: id) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
-    send_file_drop_event(window_state, FileDropEvent::Submit { position }).to_objc()
+    let taken = send_file_drop_event(window_state, FileDropEvent::Submit { position });
+    note_drag("dropped", dragging_info, &format!("taken={taken}"));
+    taken.to_objc()
 }
 
 fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths> {
