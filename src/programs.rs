@@ -43,6 +43,14 @@ struct Entry {
     /// How to start it, for an agent people can start from a menu (`knownAgents()`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     run: Vec<String>,
+    /// How to start it again in the same folder, back in its last conversation,
+    /// after its terminal was lost (a reboot): see `relaunch.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resume: Vec<String>,
+    /// The same, for the conversation whose id the agent put on its terminal
+    /// (the `herdr.session` label); `{id}` is replaced by it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    resume_id: Vec<String>,
 }
 
 impl Entry {
@@ -57,6 +65,12 @@ impl Entry {
         }
         if !mine.run.is_empty() {
             self.run = mine.run;
+        }
+        if !mine.resume.is_empty() {
+            self.resume = mine.resume;
+        }
+        if !mine.resume_id.is_empty() {
+            self.resume_id = mine.resume_id;
         }
     }
 }
@@ -169,6 +183,17 @@ pub fn load() -> Result<(), String> {
 /// program it runs (`argv`). `{ key, name, icon, tint, tile, color, shell, agent }`.
 pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
+}
+
+/// How to start the agent `key` again where it was: its conversation `id` when
+/// it said which, else its last one in that folder, else a fresh start.
+pub fn resume(key: &str, id: Option<&str>) -> Option<Vec<String>> {
+    TABLE.with(|t| {
+        let t = t.borrow();
+        let e = t.programs.get(key)?;
+        let with_id = id.filter(|_| !e.resume_id.is_empty()).map(|id| e.resume_id.iter().map(|a| a.replace("{id}", id)).collect());
+        with_id.or_else(|| [&e.resume, &e.run].into_iter().find(|c| !c.is_empty()).cloned())
+    })
 }
 
 /// An agent's 7501 `app` as a name Herdr ships (`claude` for `claude-code`),

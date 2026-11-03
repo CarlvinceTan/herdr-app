@@ -130,7 +130,13 @@ the highlighted line shows where it will land.
   terminal, and a program exiting closes its pane, even if Herdr was closed.
   Terminal panes are kept by their machine's core (`keep: true`). A lost
   terminal (core crash, reboot, logout) gets a shell in its last folder,
-  with the same address; its original command is never run again. Splits
+  with the same address; the core never runs its original command again.
+  An agent that was running there comes back: Herdr notes it on its
+  terminal while it runs (the `herdr.relaunch` label) and types its
+  `resume` command (programs.json) into the new shell. An agent that labels
+  its terminal `herdr.session=<id>` comes back to that conversation (Claude
+  Code does with a SessionStart hook: `hc label "$HC_TERMINAL_ID"
+  "herdr.session=$id"`). Other programs aren't started again. Splits
   and mod panes stay. An exited or killed terminal is closed, not restarted.
   Focus, zoom, recent spaces, settled tabs and seen attention stay on this screen.
 - Every terminal is a core terminal. Herdr labels the ones it starts with
@@ -738,7 +744,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   machine (or another) has them installed. For example, override
   `"claude": { "run": ["my-claude"] }` or add
   `"claude-alt": { "name": "Claude (alt)", "icon": "icons/claude.svg", "run": ["my-claude-alt"] }`
-  inside `programs`. Use programs or shell functions, not aliases (the launcher
+  inside `programs`. `resume`: how to start it again in the same folder,
+  back in its last conversation, after its terminal was lost
+  (`["claude", "--continue"]`); `resume_id` the same with the conversation
+  id the agent put on its terminal (`["claude", "--resume", "{id}"]`).
+  Without either, a lost agent starts fresh with `run`. Use programs or shell functions, not aliases (the launcher
   does not expand them). On macOS the menu launcher loads login profiles before
   running the agent and leaves an interactive login shell when it ends.
   On remote Unix machines, both the installed-agent check and launcher load

@@ -398,6 +398,12 @@ pub struct AppWindow {
     written_where: HashMap<String, String>,
     /// `herdr.seen` turns written but not yet back from the core.
     written_seen: HashMap<String, u64>,
+    /// The `herdr.relaunch` note last written per terminal ("" for none).
+    written_relaunch: HashMap<String, String>,
+    /// Lost agents waiting for their new shell to settle, and those typed in
+    /// (by terminal and shell pid, so each is typed once).
+    relaunch_due: HashMap<String, Instant>,
+    relaunched: HashSet<(String, u64)>,
     /// Agents the person is looking at, and the turn they were shared as seen at.
     looked: HashMap<String, u64>,
     watched: Watched,
@@ -492,6 +498,9 @@ impl AppWindow {
             reply: None,
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
+            written_relaunch: HashMap::new(),
+            relaunch_due: HashMap::new(),
+            relaunched: HashSet::new(),
             looked: HashMap::new(),
             watched: Watched::default(),
             live: HashMap::new(),
@@ -1956,6 +1965,53 @@ impl AppWindow {
         }
     }
 
+    /// Agents whose terminal was lost come back (`relaunch.rs`): noted while
+    /// they run, typed into the new shell once it has had a moment to start.
+    fn tend_relaunch(&mut self, cx: &mut Context<Self>) {
+        const SETTLE: Duration = Duration::from_millis(1500);
+        let mut writes = Vec::new();
+        let mut due = HashMap::new();
+        for (addr, rec) in &self.live {
+            let Some(step) = crate::relaunch::step(rec) else { continue };
+            let (note, line) = match step {
+                crate::relaunch::Step::Note(note) => (note, None),
+                crate::relaunch::Step::Forget => (String::new(), None),
+                crate::relaunch::Step::Start { line, note } => {
+                    let pid = rec["pid"].as_u64().unwrap_or_default();
+                    if self.relaunched.contains(&(addr.clone(), pid)) { continue; }
+                    let since = *self.relaunch_due.get(addr).unwrap_or(&Instant::now());
+                    due.insert(addr.clone(), since);
+                    if since.elapsed() < SETTLE { continue; }
+                    self.relaunched.insert((addr.clone(), pid));
+                    (note, Some(line))
+                }
+            };
+            if line.is_none() && self.written_relaunch.get(addr) == Some(&note) { continue; }
+            writes.push((addr.clone(), note, line));
+        }
+        self.relaunch_due = due;
+        self.relaunched.retain(|(a, _)| self.live.contains_key(a));
+        self.written_relaunch.retain(|a, _| self.live.contains_key(a));
+        for (addr, note, line) in writes {
+            self.written_relaunch.insert(addr.clone(), note.clone());
+            if let Some(line) = &line { tracing::info!("relaunching {addr}: {line}"); }
+            let core = self.core.clone();
+            cx.spawn(async move |this, cx| {
+                let labels = json!({ "terminal": addr, "labels": { (crate::relaunch::NOTE): note } });
+                let send = line.map(|text| json!({ "terminal": addr, "text": text }));
+                let result = cx.background_executor().spawn(async move {
+                    core.call("terminal.label", labels)?;
+                    if let Some(send) = send { core.call("terminal.send", send)?; }
+                    anyhow::Ok(())
+                }).await;
+                if let Err(e) = result {
+                    tracing::warn!("relaunch for {addr}: {e:#}");
+                    let _ = this.update(cx, |this, _| { this.written_relaunch.remove(&addr); });
+                }
+            }).detach();
+        }
+    }
+
     /// Every tick, with or without news from the core: where the terminals go
     /// (a layout that arrived late can place one now), what they mean now (a
     /// finished agent you're looking at is no longer news), their folders, their
@@ -1982,6 +2038,7 @@ impl AppWindow {
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
         changed |= self.share_seen(cx);
+        self.tend_relaunch(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
             for (addr, alert, looking) in alerts {

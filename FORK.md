@@ -21,6 +21,10 @@ Upstream [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app), plus:
 - settings.json `"pane_chooser": "<mod>"`: a tab's last pane closing leaves that mod, closing a
   space's last tab gives the space a fresh tab with it, and a person's plain new space starts at
   home with it. Tabs and spaces then close only when closed themselves (`src/model.rs`).
+- Agents come back after a reboot: Herdr notes the agent each kept terminal runs (a core label)
+  and, when the core gives that terminal a fresh shell, types the agent's `resume` command from
+  `defaults/programs.json`. Claude Code returns to its exact conversation when a SessionStart hook
+  labels its terminal `herdr.session=<id>` (`src/relaunch.rs`).
 
 Work happens on branch `cef`. `origin` is the fork, `upstream` is herdrdev. The personal mods that
 use the browser (`my-browser`, `my-tabs`, `my-pane` and others) live in `~/.config/herdr-app/mods`,
