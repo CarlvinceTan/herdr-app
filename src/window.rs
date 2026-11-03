@@ -698,7 +698,7 @@ impl AppWindow {
                     if changed { this.sync(window, cx); }
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
-                cx.background_executor().timer(Duration::from_millis(500)).await;
+                cx.background_executor().timer(Duration::from_millis(100)).await;
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {

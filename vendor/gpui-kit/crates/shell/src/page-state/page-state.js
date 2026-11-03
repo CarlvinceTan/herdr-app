@@ -56,7 +56,13 @@
           if (s.t > 0.5) el.currentTime = s.t;
           el.muted = Boolean(s.muted);
           if (s.rate) el.playbackRate = s.rate;
-          if (!s.paused) {
+          if (s.paused) {
+            // The site may autoplay it a moment later; keep the saved paused state.
+            el.pause();
+            const stop = () => { if (!el.paused) el.pause(); };
+            el.addEventListener("play", stop);
+            setTimeout(() => el.removeEventListener("play", stop), 4000);
+          } else {
             el.play().catch(() => {
               // Autoplay was blocked before the person touched the page: resume on the first click.
               addEventListener("pointerdown", () => el.play().catch(() => {}), { capture: true, once: true });
