@@ -3074,6 +3074,14 @@ impl AppWindow {
                 let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
                 c.name = name.trim().to_owned();
             }
+            "web.pages" => {
+                let pages: Vec<Value> = gpui_shell::web_view::pages().into_iter().map(|(id, url, title, _, shown)| {
+                    let private = gpui_shell::web_view::is_private(&id);
+                    json!({ "id": id, "url": url, "title": title, "private": private, "shown": shown })
+                }).collect();
+                self.answer(Ok(json!({ "pages": pages })));
+                return;
+            }
             "page.fullscreen" => {
                 let id = Self::arg(a, "id").unwrap_or_default().to_owned();
                 let on = a.get("on").and_then(Value::as_bool).unwrap_or(false);

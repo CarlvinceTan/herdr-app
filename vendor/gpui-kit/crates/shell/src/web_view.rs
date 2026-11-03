@@ -81,11 +81,11 @@ mod native {
 #[allow(unexpected_cfgs)] // The objc macros check a feature of their own.
 mod native {
     use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::{CStr, CString, c_void};
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Once;
+    use std::sync::{Once, OnceLock};
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -94,12 +94,15 @@ mod native {
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, ImplMediaAccessCallback, ImplPermissionHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient,
         ContextMenuHandler, ContextMenuParams, DisplayHandler, LifeSpanHandler, MediaAccessCallback, MenuModel, PermissionHandler,
-        PopupFeatures, Rect as CefRect, RequestContext, RequestContextSettings, RuntimeStyle, Settings,
-        Urlrequest, UrlrequestClient, WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler,
-        WrapClient, WrapContextMenuHandler, WrapDisplayHandler, WrapLifeSpanHandler, WrapPermissionHandler, WrapUrlrequestClient,
+        PopupFeatures, Rect as CefRect, RequestContext, RequestContextHandler, RequestContextSettings, ResourceRequestHandler, ReturnValue,
+        RuntimeStyle, Settings, V8Context,
+        Callback, Request, Urlrequest, UrlrequestClient, WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler,
+        WrapClient, WrapContextMenuHandler, WrapDisplayHandler, WrapLifeSpanHandler, WrapPermissionHandler,
+        WrapRenderProcessHandler, WrapRequestContextHandler, WrapResourceRequestHandler, WrapUrlrequestClient,
         rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_context_menu_handler,
-        wrap_display_handler, wrap_life_span_handler, wrap_permission_handler, wrap_urlrequest_client,
-        ImplDisplayHandler,
+        wrap_display_handler, wrap_life_span_handler, wrap_permission_handler, wrap_render_process_handler,
+        wrap_request_context_handler, wrap_resource_request_handler, wrap_urlrequest_client,
+        ImplDisplayHandler, ImplDictionaryValue, ImplRenderProcessHandler, ImplRequestContextHandler, ImplResourceRequestHandler, ImplV8Context, RenderProcessHandler,
         EventFlags, ImplContextMenuHandler, ImplContextMenuParams, ImplMenuModel,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
@@ -219,6 +222,8 @@ mod native {
         static EXTENSIONS_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
         // When uBlock said its content scripts are registered, which is later than that.
         static UBLOCK_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+        // Renderer side: browsers created private, whose frames get uBlock's scriptlets.
+        static PRIVATE_BROWSERS: RefCell<HashSet<i32>> = RefCell::new(HashSet::new());
         // A hidden page of uBlock's, opened at launch because its worker starts only when asked.
         static UBLOCK_PROBE: RefCell<Option<Browser>> = const { RefCell::new(None) };
         static UBLOCK_PROBE_HOST: Cell<Id> = const { Cell::new(NIL) };
@@ -249,6 +254,11 @@ mod native {
     pub fn set_background(color: u32) {
         BACKGROUND.store(color, Ordering::Relaxed);
     }
+
+    // The ad and tracker hosts uBlock's rulesets block, for private panes, which CEF gives no
+    // extension. Read from its rulesets once and kept beside them.
+    static UBLOCK_HOSTS: OnceLock<HashSet<String>> = OnceLock::new();
+    static UBLOCK_SCRIPTLETS: OnceLock<String> = OnceLock::new();
 
     // uBO Lite is an unpacked extension, so it has no store updater: fetch the release and
     // stage it here; the next launch swaps it in before Chromium loads extensions.
@@ -603,6 +613,10 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 Some(PumpScheduler::new())
             }
 
+            fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+                Some(PageRenderer::new())
+            }
+
             // Extensions come in as they would for Chromium itself.
             fn on_before_command_line_processing(&self, process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
                 let is_browser = process_type.is_none_or(|kind| kind.to_string().is_empty());
@@ -949,6 +963,8 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             STARTED_AT.set(Some(Instant::now()));
             STARTED_WALL.set(Some(SystemTime::now()));
             std::thread::spawn(check_ublock_update);
+            // Reading uBlock's rulesets takes a moment; do it before the first private page.
+            std::thread::spawn(|| { ublock_hosts(); });
             // The debugging port opens on a thread of its own a moment later. It's sealed before
             // the app goes on to start any children, the core among them.
             if debug_port > 0 {
@@ -1241,10 +1257,15 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             .set_as_child(host as cef::sys::cef_window_handle_t, &bounds);
         let mut client = PageClient::new();
         let mut session = private.then(private_context).flatten();
+        // The renderer reads this to know a private frame gets uBlock's scriptlets itself.
+        let mut extra = private.then(|| cef::dictionary_value_create()).flatten();
+        if let Some(extra) = extra.as_mut() {
+            extra.set_bool(Some(&CefString::from("herdr-private")), 1);
+        }
         let settings = BrowserSettings { background_color: BACKGROUND.load(Ordering::Relaxed), ..Default::default() };
         let browser = cef::browser_host_create_browser_sync(
             Some(&info), Some(&mut client), Some(&CefString::from(url)),
-            Some(&settings), None, session.as_mut(),
+            Some(&settings), extra.as_mut(), session.as_mut(),
         )?;
         if let Some(browser_host) = browser.host() {
             let view = browser_host.window_handle() as Id;
@@ -1876,14 +1897,192 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
     }
 
     /// The private panes' session: in memory only (no cache folder), shared while any is open.
+    /// CEF gives a session of its own no extensions, so this one carries uBlock's host rules.
     fn private_context() -> Option<RequestContext> {
         PRIVATE_CONTEXT.with_borrow_mut(|context| {
             if context.is_none() {
                 let settings = RequestContextSettings { persist_session_cookies: 0, ..Default::default() };
-                *context = cef::request_context_create_context(Some(&settings), None);
+                let mut handler = PrivateSession::new();
+                *context = cef::request_context_create_context(Some(&settings), Some(&mut handler));
             }
             context.clone()
         })
+    }
+
+    wrap_request_context_handler! {
+        struct PrivateSession;
+
+        impl RequestContextHandler {
+            fn resource_request_handler(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                _request: Option<&mut Request>,
+                _is_navigation: ::std::os::raw::c_int,
+                _is_download: ::std::os::raw::c_int,
+                _request_initiator: Option<&CefString>,
+                _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
+            ) -> Option<ResourceRequestHandler> {
+                Some(PrivateRequests::new())
+            }
+        }
+    }
+
+    wrap_resource_request_handler! {
+        struct PrivateRequests;
+
+        impl ResourceRequestHandler {
+            fn on_before_resource_load(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                request: Option<&mut Request>,
+                _callback: Option<&mut Callback>,
+            ) -> ReturnValue {
+                let Some(request) = request else { return ReturnValue::CONTINUE };
+                let url = CefString::from(&request.url()).to_string();
+                if host_blocked(&host_of_url(&url)) { ReturnValue::CANCEL } else { ReturnValue::CONTINUE }
+            }
+        }
+    }
+
+    fn host_of_url(url: &str) -> String {
+        let Some((_, rest)) = url.split_once("://") else { return String::new() };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let authority = authority.rsplit('@').next().unwrap_or(authority);
+        let host = if authority.starts_with('[') {
+            authority.split(']').next().unwrap_or_default().trim_start_matches('[')
+        } else {
+            authority.split(':').next().unwrap_or_default()
+        };
+        host.to_ascii_lowercase()
+    }
+
+    fn host_blocked(host: &str) -> bool {
+        if host.is_empty() { return false }
+        let hosts = ublock_hosts();
+        let mut rest = host;
+        loop {
+            if hosts.contains(rest) { return true }
+            let Some((_, tail)) = rest.split_once('.') else { return false };
+            rest = tail;
+        }
+    }
+
+    /// Hosts uBlock's enabled rulesets block, read from the rulesets once and kept beside them.
+    fn ublock_hosts() -> &'static HashSet<String> {
+        UBLOCK_HOSTS.get_or_init(|| {
+            let dir = state_dir().join("ublock");
+            let version = ublock_version(&dir)
+                .map(|parts| parts.iter().map(|part| part.to_string()).collect::<Vec<_>>().join("."))
+                .unwrap_or_default();
+            let stamp = format!("# {version}");
+            let cache = dir.join("herdr-hosts.txt");
+            if let Ok(text) = std::fs::read_to_string(&cache) {
+                let mut lines = text.lines();
+                if lines.next() == Some(stamp.as_str()) {
+                    return lines.filter(|line| line.is_empty() == false).map(str::to_owned).collect();
+                }
+            }
+            let hosts = build_ublock_hosts(&dir);
+            let mut text = format!("{stamp}\n");
+            for host in &hosts {
+                text.push_str(host);
+                text.push('\n');
+            }
+            let _ = std::fs::write(&cache, text);
+            hosts
+        })
+    }
+
+    fn build_ublock_hosts(dir: &Path) -> HashSet<String> {
+        const RULESETS: [&str; 6] = ["ublock-filters", "easylist", "easyprivacy", "pgl", "ublock-badware", "urlhaus-full"];
+        let mut block = HashSet::new();
+        let mut allow = HashSet::new();
+        for name in RULESETS {
+            let Ok(text) = std::fs::read_to_string(dir.join(format!("rulesets/main/{name}.json"))) else { continue };
+            let Ok(rules) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { continue };
+            for rule in rules {
+                let blocking = match rule["action"]["type"].as_str() {
+                    Some("block") => true,
+                    Some("allow") | Some("allowAllRequests") => false,
+                    _ => continue,
+                };
+                let condition = &rule["condition"];
+                let mut hosts: Vec<String> = Vec::new();
+                if let Some(domains) = condition["requestDomains"].as_array() {
+                    for domain in domains.iter().filter_map(|domain| domain.as_str()) {
+                        if domain.is_empty() || domain.starts_with('~') { continue }
+                        hosts.push(domain.to_owned());
+                    }
+                }
+                if let Some(filter) = condition["urlFilter"].as_str() {
+                    if let Some(rest) = filter.strip_prefix("||") {
+                        let host = rest.strip_suffix('^').unwrap_or(rest);
+                        if host.contains('.') && host.contains(|c: char| c == '/' || c == '*' || c == '|' || c == '^' || c == '?') == false {
+                            hosts.push(host.to_owned());
+                        }
+                    }
+                }
+                if blocking { block.extend(hosts) } else { allow.extend(hosts) }
+            }
+        }
+        block.retain(|host| allow.contains(host) == false);
+        block
+    }
+
+    /// uBlock's scriptlets for its default ruleset, for private frames: the extension's own
+    /// content scripts are not there to inject them.
+    fn ublock_scriptlets() -> &'static str {
+        UBLOCK_SCRIPTLETS.get_or_init(|| {
+            let base = state_dir().join("ublock/rulesets/scripting/scriptlet/main");
+            let mut code = String::new();
+            for name in ["scriptlet-begin.js", "ublock-filters.js", "scriptlet-end.js"] {
+                if let Ok(text) = std::fs::read_to_string(base.join(name)) {
+                    code.push_str(&text);
+                    code.push('\n');
+                }
+            }
+            code
+        })
+    }
+
+    wrap_render_process_handler! {
+        struct PageRenderer;
+
+        impl RenderProcessHandler {
+            fn on_browser_created(
+                &self,
+                browser: Option<&mut Browser>,
+                extra_info: Option<&mut DictionaryValue>,
+            ) {
+                let (Some(browser), Some(info)) = (browser, extra_info) else { return };
+                if info.has_key(Some(&CefString::from("herdr-private"))) == 0 { return }
+                PRIVATE_BROWSERS.with_borrow_mut(|private| { private.insert(browser.identifier()); });
+            }
+
+            fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
+                let Some(browser) = browser else { return };
+                PRIVATE_BROWSERS.with_borrow_mut(|private| { private.remove(&browser.identifier()); });
+            }
+
+            fn on_context_created(
+                &self,
+                browser: Option<&mut Browser>,
+                frame: Option<&mut Frame>,
+                context: Option<&mut V8Context>,
+            ) {
+                let (Some(browser), Some(frame), Some(context)) = (browser, frame, context) else { return };
+                if frame.is_main() == 0 { return }
+                let private = PRIVATE_BROWSERS.with_borrow(|private| private.contains(&browser.identifier()));
+                if private == false { return }
+                let code = ublock_scriptlets();
+                if code.is_empty() { return }
+                let mut result = None;
+                let mut exception = None;
+                context.eval(Some(&CefString::from(code)), None, 0, Some(&mut result), Some(&mut exception));
+            }
+        }
     }
 
     fn set_view_hidden(browser: &Browser, hidden: bool) {
