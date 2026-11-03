@@ -75,6 +75,8 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>)>,
     /// The font size, cell size, font and fonts loaded the drawings were built with.
     painted_with: (u32, Size<Pixels>, String, u64),
+    /// Skip one paint after the grid changes size, so the old rows never show stretched.
+    hold: bool,
 }
 
 pub struct TerminalView {
@@ -210,6 +212,7 @@ impl TerminalView {
                 cursor_at: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0),
+                hold: false,
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -352,6 +355,11 @@ impl TerminalView {
         self.left_full_screen_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1))
     }
 
+    /// Skip the next paint of the grid after its padding (and so its size) changes.
+    pub fn hold_next_frame(&self) {
+        self.grid.borrow_mut().hold = true;
+    }
+
     pub fn detach(&self) {
         let g = self.grid.borrow();
         if let Some(ch) = g.channel {
@@ -408,6 +416,7 @@ impl TerminalView {
         if left_full_screen && self.program_padding.is_some() {
             self.program_padding = None;
             self.left_full_screen_at = Some(Instant::now());
+            self.grid.borrow_mut().hold = true;
             cx.notify();
         }
         // A program that just took the full screen (OpenCode) may have its own
@@ -423,6 +432,7 @@ impl TerminalView {
             && self.program_padding != Some(padding)
         {
             self.program_padding = Some(padding);
+            self.grid.borrow_mut().hold = true;
             cx.notify();
         }
         if let Some(title) = title {
@@ -1246,9 +1256,15 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, pad: (f32, f32),
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
+    let hold = std::mem::take(&mut g.hold);
     drop(g);
 
     window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    if hold {
+        // The next frame draws the cells at the new size.
+        window.refresh();
+        return;
+    }
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {

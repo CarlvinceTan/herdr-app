@@ -1988,6 +1988,7 @@ impl AppWindow {
             v.right_click_to_program = to_program;
             if v.program_padding != padding {
                 v.program_padding = padding;
+                v.hold_next_frame();
                 cx.notify();
             }
         });
@@ -2012,6 +2013,7 @@ impl AppWindow {
                 });
                 if v.program_padding != padding {
                     v.program_padding = padding;
+                    v.hold_next_frame();
                     cx.notify();
                 }
             });
