@@ -25,11 +25,6 @@ fn drop_zone(bounds: Bounds<Pixels>, at: Point<Pixels>) -> Option<Option<Edge>> 
 /// The top row of a pane without a top header.
 const STRIP: f32 = 18.;
 
-fn top_strip(mut bounds: Bounds<Pixels>, row: f32, at: Point<Pixels>) -> bool {
-    bounds.size.height = bounds.size.height.min(settings::z(row));
-    bounds.contains(&at)
-}
-
 fn inherited_movable(root: &Node, id: &str) -> Option<bool> {
     root.path_to(id)?.iter().rev().find_map(|id| root.find(id)?.movable)
 }
@@ -78,10 +73,12 @@ impl AppWindow {
             tab.shown().visible_blocks().into_iter().find_map(|n| {
                 let b = bounds.get(&n.id)?;
                 let row = rows.get(&n.id).copied().unwrap_or(STRIP);
-                // Only near the grip at the top middle, not anywhere on the header.
+                // Only over the grip itself (28 x 18 at the top middle), not the header.
                 let centre = f32::from(b.origin.x) + f32::from(b.size.width) / 2.0;
-                let near = (f32::from(at.x) - centre).abs() <= settings::z(36.0).into();
-                (near && self.pane_movable(&n.id) && top_strip(*b, row, at)).then(|| n.id.clone())
+                let top = f32::from(b.origin.y) + f32::from(settings::z((row - 18.0) / 2.0));
+                let near = (f32::from(at.x) - centre).abs() <= f32::from(settings::z(14.0))
+                    && f32::from(at.y) >= top && f32::from(at.y) <= top + f32::from(settings::z(18.0));
+                (near && self.pane_movable(&n.id)).then(|| n.id.clone())
             })
         });
         if hovered != self.pane_grip_hover {
