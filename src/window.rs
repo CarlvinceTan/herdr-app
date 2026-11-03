@@ -2505,7 +2505,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, axis: Axis, before: bool, argv: Option<Vec<String>>, folder: Option<String>) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
@@ -2515,12 +2515,12 @@ impl AppWindow {
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
         let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref())?;
-        self.model.split(&target, axis, &new, &addr);
+        self.model.split_side(&target, axis, &new, &addr, before);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
 
     /// A mod as a pane beside the target (a viewer next to the shell).
-    fn split_mod(&mut self, pane: Option<String>, axis: Axis, name: String, props: Value) -> Result<Value, String> {
+    fn split_mod(&mut self, pane: Option<String>, axis: Axis, before: bool, name: String, props: Value) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         if self.model.tab_of(&target).is_none() {
             return Err(format!("no pane {target:?}"));
@@ -2531,7 +2531,7 @@ impl AppWindow {
         let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
         self.require_document(machine.as_deref())?;
         let new = self.model.fresh_id_on("p", machine.as_deref());
-        self.model.split_with(&target, axis, Node::block(new.clone(), Content::Mod { name, props }));
+        self.model.split_with_side(&target, axis, Node::block(new.clone(), Content::Mod { name, props }), before);
         Ok(json!({ "pane": new }))
     }
 
@@ -3050,14 +3050,16 @@ impl AppWindow {
             }
             // ---- panes
             "pane.split" => {
-                let axis = match Self::arg(a, "direction") {
-                    Some("right") => Axis::Row,
-                    Some("down") => Axis::Column,
-                    other => return self.fail(format!("pane.split direction is \"right\" or \"down\", not {other:?}")),
+                let (axis, before) = match Self::arg(a, "direction") {
+                    Some("right") => (Axis::Row, false),
+                    Some("left") => (Axis::Row, true),
+                    Some("down") => (Axis::Column, false),
+                    Some("up") => (Axis::Column, true),
+                    other => return self.fail(format!("pane.split direction is \"left\", \"right\", \"up\" or \"down\", not {other:?}")),
                 };
                 let r = match Self::owned(a, "mod") {
-                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None),
+                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, before, name, a.get("props").cloned().unwrap_or(Value::Null)),
+                    None => self.split(Self::owned(a, "pane"), axis, before, Self::argv(a), None),
                 };
                 self.answer(r);
             }
@@ -3123,8 +3125,8 @@ impl AppWindow {
             "terminal.open" => {
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder")),
-                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder")),
+                    "right" => self.split(None, Axis::Row, false, argv, Self::owned(a, "folder")),
+                    "down" => self.split(None, Axis::Column, false, argv, Self::owned(a, "folder")),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))

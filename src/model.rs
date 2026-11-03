@@ -280,14 +280,27 @@ impl Model {
         self.split_with(target, axis, pane(new_pane, address))
     }
 
+    /// The same, with the new terminal before the target (a split to the left or up).
+    pub fn split_side(&mut self, target: &str, axis: Axis, new_pane: &str, address: &str, before: bool) -> bool {
+        self.split_with_side(target, axis, pane(new_pane, address), before)
+    }
+
     /// Splits a pane with any block: a terminal, or a mod (a viewer beside the shell).
     pub fn split_with(&mut self, target: &str, axis: Axis, block: Node) -> bool {
+        self.split_with_side(target, axis, block, false)
+    }
+
+    /// The same, with the new pane before the target (a split to the left or up).
+    pub fn split_with_side(&mut self, target: &str, axis: Axis, block: Node, before: bool) -> bool {
         let machine = self.space_of(target).and_then(|s| s.machine.clone());
         let container = self.fresh_id_on("s", machine.as_deref());
         let new_pane = block.id.clone();
         let Some(c) = self.tab_of_mut(target) else { return false };
         if !c.root.split(target, axis, block, container) {
             return false;
+        }
+        if before {
+            c.root.swap(&new_pane, target);
         }
         c.zoomed = None;
         c.focus(&new_pane);
@@ -862,6 +875,15 @@ mod tests {
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         // The arrangement keeps the tab's id with one pane left.
         assert_eq!(m.active_tab().unwrap().root.id, "c1");
+    }
+
+    #[test]
+    fn a_split_can_go_before_its_pane() {
+        let mut m = model_with_one();
+        assert!(m.split_side("x1", Axis::Row, "x9", "t9", true));
+        assert_eq!(m.focused_pane().as_deref(), Some("x9"));
+        let ids: Vec<&str> = m.active_tab().unwrap().root.panes().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["x9", "x1"]);
     }
 
     #[test]
