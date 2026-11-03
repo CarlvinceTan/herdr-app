@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, normal_url, on_click, pages, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, pages, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -62,6 +62,7 @@ mod native {
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
     pub fn ids() -> Vec<String> { Vec::new() }
+    pub fn order_back(_: &Window) {}
     pub fn set_suspended(_: bool) {}
     pub fn set_undrawn(_: std::collections::HashSet<String>) {}
     pub fn begin_covers(_: bool) {}
@@ -367,7 +368,8 @@ mod native {
                 }
                 // HERDR_KEEP_PAGES_AWAKE keeps pages live while the window is covered, for tests run
                 // in a copy behind another window (a covered page is hidden and takes no input).
-                if std::env::var_os("HERDR_KEEP_PAGES_AWAKE").is_some() {
+                // A background copy (HERDR_BACKGROUND) sits behind other windows, so it does too.
+                if std::env::var_os("HERDR_KEEP_PAGES_AWAKE").is_some() || std::env::var_os("HERDR_BACKGROUND").is_some() {
                     switch("disable-backgrounding-occluded-windows", None);
                 }
                 let folders: Vec<String> = ["ublock".to_owned(), own_extension_folder("extensions-page"), own_extension_folder("autofill")]
@@ -941,6 +943,20 @@ mod native {
                 let class: Id = msg_send![window, className];
                 (visible == YES && rust_string(class).starts_with("NativeWidget")).then_some(window)
             }).collect()
+        }
+    }
+
+    /// Puts the window behind every other app's, without touching focus: for a copy of the app
+    /// run in the background (tests), which mustn't cover what the person is doing.
+    pub fn order_back(window: &Window) {
+        let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+        let view = handle.ns_view.as_ptr() as Id;
+        unsafe {
+            let ns_window: Id = msg_send![view, window];
+            if !ns_window.is_null() {
+                let _: () = msg_send![ns_window, orderBack: NIL];
+            }
         }
     }
 

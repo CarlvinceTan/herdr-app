@@ -52,6 +52,7 @@ pub(crate) use gpui_apple::{AppleActivity, AppleDispatcher};
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
+pub use window::draw_when_covered;
 
 #[cfg(feature = "font-kit")]
 pub(crate) use text_system::*;

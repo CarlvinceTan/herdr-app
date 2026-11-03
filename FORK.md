@@ -25,6 +25,9 @@ Upstream [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app), plus:
   and, when the core gives that terminal a fresh shell, types the agent's `resume` command from
   `defaults/programs.json`. Claude Code returns to its exact conversation when a SessionStart hook
   labels its terminal `herdr.session=<id>` (`src/relaunch.rs`).
+- `HERDR_BACKGROUND=1` runs a copy for testing out of the way: no Dock icon, never in front or
+  taking the keyboard, still drawing and running pages while covered (`src/main.rs`,
+  `draw_when_covered` in `vendor/gpui-pre-macos`). AGENTS.md says how tests use it.
 
 Work happens on branch `cef`. `origin` is the fork, `upstream` is herdrdev. The personal mods that
 use the browser (`my-browser`, `my-tabs`, `my-pane` and others) live in `~/.config/herdr-app/mods`,

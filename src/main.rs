@@ -165,6 +165,13 @@ fn main() {
     gpui_platform::application()
         .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
         .run(move |cx| {
+            // A copy for testing stays out of the way: no Dock icon or menu bar, never in front.
+            if background() {
+                cx.set_activation_policy(ActivationPolicy::Accessory);
+                // Behind the person's windows, and still drawing (and running its mods).
+                #[cfg(target_os = "macos")]
+                gpui_macos::draw_when_covered(true);
+            }
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
                 tracing::warn!("bundled fonts not loaded: {e:#}");
@@ -212,6 +219,12 @@ fn main() {
         });
 }
 
+/// `HERDR_BACKGROUND` set: a copy run for testing beside the person's own Herdr. It has no Dock
+/// icon, never comes to the front and never takes the keyboard, so tests leave them undisturbed.
+pub fn background() -> bool {
+    std::env::var_os("HERDR_BACKGROUND").is_some_and(|v| !v.is_empty())
+}
+
 /// The main window, on a connected core.
 pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
             let (window_bounds, display_id) = place::initial(cx);
@@ -229,9 +242,14 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                 app_owns_titlebar_drag: cfg!(target_os = "macos"),
                 // Herdr Dev and other side-by-side builds get their own dock icon.
                 app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
+                focus: !background(),
                 ..Default::default()
             };
-            cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
+            let handle = cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
                 .expect("cannot open the Herdr window");
-            cx.activate(true);
+            if background() {
+                let _ = handle.update(cx, |_, window, _| gpui_shell::web_view::order_back(window));
+            } else {
+                cx.activate(true);
+            }
 }

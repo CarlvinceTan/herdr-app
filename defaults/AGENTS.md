@@ -59,6 +59,23 @@ commands. They're rewritten on every start to match this version.
 - **Escape hatch:** `ctrl-alt-shift-escape` always works: it sets the shown
   layout and `keys.json` aside (`*.reset-<time>`) and goes back to the
   default `main` layout. Nothing can rebind it.
+- **Test in the background, never in the person's way.** For anything more
+  than a check, try it in a copy of the app with its own home and core:
+  `HERDR_APP_HOME=<scratch> XDG_STATE_HOME=<scratch state> HERDR_BACKGROUND=1
+  /Applications/Herdr.app/Contents/MacOS/Herdr`, with the mods you're testing
+  copied into `<scratch>/mods`. `HERDR_BACKGROUND` gives it no Dock icon and
+  keeps it behind other windows, never taking the keyboard, while it goes on
+  drawing and running its mods and pages. Drive it with `herdr-app` and `hc`
+  in that environment, and look with `herdr-app shot`. Never activate it,
+  move the pointer, click or type for a test unless the person agrees first.
+- **Leave nothing running.** When you're done, quit the copy (`herdr-app do
+  app.quit`) and stop its core (`hc server stop`), both in its environment.
+  Before stopping a core, check that `hc server status` names the copy's
+  core, never the person's.
+- **Finish the job.** When the work is done and checked, the Herdr the
+  person is using should already run it: mods, layouts, settings, keys and
+  programs apply on save; a change to the app itself means installing the
+  new build. Say plainly if anything is left undone or unchecked.
 
 ## Seeing the window
 

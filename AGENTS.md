@@ -79,6 +79,23 @@ On Linux, test UI changes in the sandbox: `scripts/sandbox up`, then `do
 on your screen. Never fake input on a real display. Run `scripts/sandbox
 down` when done.
 
+On macOS (this fork), test in a background copy: run
+`target/bundle/Herdr.app/Contents/MacOS/Herdr` with its own `HERDR_APP_HOME`
+and `XDG_STATE_HOME` (so its own core) and `HERDR_BACKGROUND=1`. It has no
+Dock icon, stays behind the person's windows without taking the keyboard,
+and keeps drawing (mods and web pages too) while covered. Drive it with
+`herdr-app do|status|ls|shot` and `hc` in the same environment, and its pages
+over their DevTools port; never activate it, click, type or move the pointer
+unless the person agrees first. `scripts/bundle-cef.sh` only packages
+`target/release/herdr-app`: run `cargo build --release` first. When done, quit
+the copy and stop its core (`hc server stop` in its environment, after
+`hc server status` shows its core, not the person's). Leave nothing running.
+
+Finish by bringing the running app up to date: once a change is complete,
+verified and committed, install it (`scripts/install-fork.sh`, see FORK.md)
+so the Herdr in use is the branch. Don't stop with a change half-applied or
+unverified without saying so.
+
 ## Contributing
 
 Work on a branch and open a pull request to `master`. CI must pass and Can

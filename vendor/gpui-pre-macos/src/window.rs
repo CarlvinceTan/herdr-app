@@ -840,7 +840,8 @@ impl MacWindowState {
     fn start_display_link(&mut self) {
         self.stop_display_link();
         unsafe {
-            if !self
+            if !draws_when_covered()
+                && !self
                 .native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
@@ -2998,6 +2999,19 @@ fn report_visibility(window_state: &Arc<Mutex<MacWindowState>>) {
         .detach();
 }
 
+static DRAW_WHEN_COVERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Keeps windows drawing while another window covers them. A covered window normally stops its
+/// frame clock, which saves everything; an app run in the background for tests needs to keep
+/// going. Set before any window opens.
+pub fn draw_when_covered(on: bool) {
+    DRAW_WHEN_COVERED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn draws_when_covered() -> bool {
+    DRAW_WHEN_COVERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
@@ -3009,7 +3023,7 @@ extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {
         {
             lock.move_traffic_light();
             lock.start_display_link();
-        } else {
+        } else if !draws_when_covered() {
             lock.stop_display_link();
         }
     }
