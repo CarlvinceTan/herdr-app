@@ -3089,6 +3089,8 @@ impl AppWindow {
                         window.toggle_fullscreen();
                     }
                 }
+                // The pane takes the window (or its own bounds again) without waiting for a resize.
+                cx.notify();
             }
             "tab.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };

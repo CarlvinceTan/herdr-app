@@ -184,9 +184,8 @@ mod native {
         // While the pane is private: its normal page, parked and hidden, to come back as it was.
         normal: Option<Browser>,
         // A page asked for fullscreen (a video): the page covers the window, and the window is
-        // in macOS fullscreen until the page leaves it. The frame to return to is kept.
+        // in macOS fullscreen until the page leaves it.
         fullscreen: bool,
-        saved_frame: Option<NsRect>,
     }
 
     /// Herdr's own popups and toasts over pages, in window coordinates: the page shows a hole
@@ -719,26 +718,19 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
     // A page's fullscreen covers the window, and Herdr puts the window itself in fullscreen.
     // This covers and uncovers the window; the frame to return to is the one layout last gave.
     pub fn set_fullscreen(id: &str, on: bool) {
-        let Some((host, saved)) = VIEWS.with_borrow_mut(|views| {
+        let Some(host) = VIEWS.with_borrow_mut(|views| {
             let view = views.get_mut(id)?;
-            if view.fullscreen == on {
-                return None;
-            }
             view.fullscreen = on;
-            Some((view.host, view.saved_frame))
+            Some(view.host)
         }) else { return };
-        let frame: NsRect = if on {
-            let parent: Id = unsafe { msg_send![host, superview] };
-            if parent.is_null() {
-                return;
-            }
+        if on == false {
+            return;
+        }
+        // Over Herdr's own chrome, which shows again when the page leaves fullscreen.
+        let parent: Id = unsafe { msg_send![host, superview] };
+        if !parent.is_null() {
             unsafe { let _: () = msg_send![parent, addSubview: host positioned: 1i64 relativeTo: NIL]; }
-            unsafe { msg_send![parent, bounds] }
-        } else {
-            let Some(frame) = saved else { return };
-            frame
-        };
-        unsafe { let _: () = msg_send![host, setFrame: frame]; }
+        }
     }
 
     // A page that asks for the microphone or camera (voice search, a call) gets them: these are
@@ -1451,7 +1443,6 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 hole: None,
                 normal: None,
                 fullscreen: false,
-                saved_frame: None,
             });
             view.top = top;
             view.left = left;
@@ -1459,9 +1450,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             let frame = if view.fullscreen {
                 NsRect { origin: Point { x: 0.0, y: 0.0 }, size: space.size }
             } else {
-                let frame = NsRect { origin: Point { x: left, y: space.size.h - top - height }, size: Size { w: width, h: height } };
-                view.saved_frame = Some(frame);
-                frame
+                NsRect { origin: Point { x: left, y: space.size.h - top - height }, size: Size { w: width, h: height } }
             };
             unsafe {
                 let _: () = msg_send![view.host, setFrame: frame];
@@ -1559,7 +1548,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             views.insert(id.to_owned(), View {
                 host, browser: Some(browser), url: url.to_owned(), title: String::new(),
                 zoom: DEFAULT_ZOOM, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
-                fullscreen: false, saved_frame: None,
+                fullscreen: false,
             });
         });
         apply_visibility();
