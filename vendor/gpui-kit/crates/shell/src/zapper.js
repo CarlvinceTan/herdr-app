@@ -88,6 +88,8 @@
   const redo = [];
   let target = null;
   let drag = null;
+  let moved = false;
+  let suppressClick = false;
 
   const isUi = (node) => node === dock || dock.contains(node) || node === box;
   const sync = () => {
@@ -185,6 +187,11 @@
   const scroll = () => outline(target);
 
   dock.addEventListener("click", (event) => {
+    if (suppressClick) {
+      suppressClick = false;
+      event.stopPropagation();
+      return;
+    }
     const button = event.target.closest("button");
     if (!button) return;
     event.stopPropagation();
@@ -212,23 +219,31 @@
     }
   });
 
-  dock.addEventListener("pointerdown", (event) => {
-    if (event.target.closest("button")) return;
-    const rect = dock.getBoundingClientRect();
-    drag = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    dock.classList.add("dragging");
-    dock.setPointerCapture(event.pointerId);
-  });
-  dock.addEventListener("pointermove", (event) => {
+  // The whole dock drags: a press that moves repositions it, a press that doesn't clicks a button.
+  const dragMove = (event) => {
     if (!drag) return;
-    dock.style.left = `${event.clientX - drag.x}px`;
-    dock.style.top = `${event.clientY - drag.y}px`;
+    if (!moved && Math.hypot(event.clientX - drag.sx, event.clientY - drag.sy) < 3) return;
+    moved = true;
+    dock.style.left = `${event.clientX - drag.dx}px`;
+    dock.style.top = `${event.clientY - drag.dy}px`;
     dock.style.bottom = "auto";
     dock.style.transform = "none";
-  });
-  dock.addEventListener("pointerup", () => {
+  };
+  const dragEnd = () => {
+    if (moved) suppressClick = true;
     drag = null;
+    moved = false;
     dock.classList.remove("dragging");
+    removeEventListener("pointermove", dragMove);
+    removeEventListener("pointerup", dragEnd);
+  };
+  dock.addEventListener("pointerdown", (event) => {
+    const rect = dock.getBoundingClientRect();
+    drag = { dx: event.clientX - rect.left, dy: event.clientY - rect.top, sx: event.clientX, sy: event.clientY };
+    moved = false;
+    dock.classList.add("dragging");
+    addEventListener("pointermove", dragMove);
+    addEventListener("pointerup", dragEnd);
   });
 
   const stop = () => {
