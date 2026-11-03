@@ -1226,6 +1226,9 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 ("r", _) => browser.reload(),
                 ("[", _) => browser.go_back(),
                 ("]", _) => browser.go_forward(),
+                // The arrow keys arrive as function-key characters (NSLeftArrowFunctionKey).
+                ("\u{f702}", _) => browser.go_back(),
+                ("\u{f703}", _) => browser.go_forward(),
                 ("l", _) => view.asked = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis() as u64),
                 _ => return false,
             }
