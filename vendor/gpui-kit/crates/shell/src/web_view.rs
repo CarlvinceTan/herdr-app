@@ -2080,6 +2080,12 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 let (Some(browser), Some(frame), Some(context)) = (browser, frame, context) else { return };
                 if frame.is_main() == 0 { return }
                 let private = PRIVATE_BROWSERS.with_borrow(|private| private.contains(&browser.identifier()));
+                {
+                    let probe = format!("window.__herdr_render = '{}';", if private { "private" } else { "public" });
+                    let mut result = None;
+                    let mut exception = None;
+                    context.eval(Some(&CefString::from(probe.as_str())), None, 0, Some(&mut result), Some(&mut exception));
+                }
                 if private == false { return }
                 let code = ublock_scriptlets();
                 if code.is_empty() { return }
