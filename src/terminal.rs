@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-fn pad() -> (f32, f32) {
-    let p = crate::settings::get().terminal_padding;
+fn pad(over: Option<[f32; 2]>) -> (f32, f32) {
+    let p = over.unwrap_or(crate::settings::get().terminal_padding);
     let zoom = crate::settings::zoom();
     (p[0] * zoom, p[1] * zoom)
 }
@@ -91,6 +91,8 @@ pub struct TerminalView {
     link: Option<LinkTarget>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
+    /// The program's own space around the terminal (programs.json), over the layout's.
+    pub program_padding: Option<[f32; 2]>,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -185,6 +187,7 @@ impl TerminalView {
             cwd: None,
             link: None,
             right_click_to_program: false,
+            program_padding: None,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -711,6 +714,9 @@ fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
 /// tests`, braille dots) is no part of it. Herdr draws its own, and a title
 /// that spins would redraw every mod that shows titles, 10 times a second.
 pub(crate) fn shown_title(title: &str) -> &str {
+    // OpenCode puts its own initials in front of every title ("OC | Fix the tests");
+    // the pane already shows the program, so people get the title alone.
+    let title = title.strip_prefix("OC | ").unwrap_or(title);
     // Frames agents spin, not status icons (\u{2713} build stays): braille dots,
     // Claude Code's stars and its half circles.
     let spinner = |c: char| {
@@ -1142,16 +1148,23 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
     ops
 }
 
-fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+/// How much of the rows' leftover height sits above the grid: centered when the
+/// terminal is padded, none when the program draws to its top edge.
+fn spare_above(pad_y: f32, spare: f32) -> f32 {
+    if pad_y == 0.0 { 0.0 } else { (spare / 2.0).floor() }
+}
+
+fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, pad: (f32, f32), focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
-    let (pad_x, pad_y) = pad();
-    // Rows rarely fill the height exactly: split what's left above and below.
+    let (pad_x, pad_y) = pad;
+    // Rows rarely fill the height exactly: split what's left above and below,
+    // unless there's no top padding to begin with: then the grid starts at the top.
     let spare = (f32::from(bounds.size.height) - 2.0 * pad_y - f32::from(cell.height) * g.vt.rows as f32).max(0.0);
     let scale = window.scale_factor();
     let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
-    let origin = bounds.origin + point(px(pad_x), px(pad_y + (spare / 2.0).floor()));
+    let origin = bounds.origin + point(px(pad_x), px(pad_y + spare_above(pad_y, spare)));
     let origin = point(snap(origin.x), snap(origin.y));
     g.origin = origin;
     let frame = g.vt.frame();
@@ -1385,6 +1398,7 @@ impl Render for TerminalView {
         self.grid.borrow_mut().link_spans = spans.unwrap_or_default();
         let grid = self.grid.clone();
         let grid_paint = self.grid.clone();
+        let pad = pad(self.program_padding);
         let selection_view = cx.entity().downgrade();
         let (input_focus, input_view) = (self.focus.clone(), cx.entity());
         let ended = self.ended.clone().or_else(|| self.lost.then(|| "reconnecting to core…".to_owned()));
@@ -1465,7 +1479,7 @@ impl Render for TerminalView {
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
                         g.refresh_theme(&vt::theme(), dev);
-                        let (px_, py_) = pad();
+                        let (px_, py_) = pad;
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
                         if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
@@ -1480,7 +1494,7 @@ impl Render for TerminalView {
                         }
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        paint_grid(bounds, &grid_paint, pad, focused, window, cx);
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -1691,6 +1705,8 @@ mod tests {
         assert_eq!(shown_title("\u{280b} working"), "working", "braille");
         assert_eq!(shown_title("\u{25d0} \u{2733}  two of them"), "two of them");
         assert_eq!(shown_title("~/Projects/herdr"), "~/Projects/herdr", "a folder keeps its ~");
+        assert_eq!(shown_title("OC | Fix the tests"), "Fix the tests", "OpenCode's initials");
+        assert_eq!(shown_title("OC | \u{2733} Fix the tests"), "Fix the tests");
         assert_eq!(shown_title("\u{03c0} - pi"), "\u{03c0} - pi", "a letter is no spinner");
         assert_eq!(shown_title("\u{2733}"), "\u{2733}", "nothing after it: kept");
         assert_eq!(shown_title("\u{2713} build"), "\u{2713} build", "a status icon stays");
@@ -2056,6 +2072,12 @@ mod tests {
             vt.write(output);
             assert_eq!(key_bytes(&mut vt, &press("shift-enter", None)).as_deref(), Some(expected), "output={output:?}");
         }
+    }
+
+    #[test]
+    fn a_grid_without_top_padding_starts_at_the_top() {
+        assert_eq!(super::spare_above(0.0, 9.0), 0.0);
+        assert_eq!(super::spare_above(6.0, 9.0), 4.0);
     }
 
     #[test]

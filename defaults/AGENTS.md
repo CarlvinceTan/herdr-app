@@ -756,6 +756,10 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - `icon`: a path in the home folder. `tint: true` for a one-color glyph
   (drawn in `color` on a tile, or the text color), false for a picture.
 - `match`: other process names (or agents' `app` names) for the entry.
+- `terminal_padding`: space between the pane's edge and the terminal, in px:
+  `[x, y]`, overriding the layout's `terminal_padding` for that program only.
+  `[0, 0]` draws the program's whole grid to the top-left edge (a TUI with
+  its own frame loses Herdr's gap; the shell it returns to gets the gap back).
 - `run`: how to start it (`["cursor-agent"]`), for agents people start
   from a menu: `knownAgents()` lists the entries with one, and whether this
   machine (or another) has them installed. For example, override

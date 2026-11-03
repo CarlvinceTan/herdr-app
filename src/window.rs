@@ -1931,9 +1931,14 @@ impl AppWindow {
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
-        view.update(cx, |v, _| {
+        let padding = self.live.get(addr).and_then(|r| r.pointer("/program/key")).and_then(Value::as_str).and_then(crate::programs::terminal_padding);
+        view.update(cx, |v, cx| {
             v.cwd = cwd;
             v.right_click_to_program = to_program;
+            if v.program_padding != padding {
+                v.program_padding = padding;
+                cx.notify();
+            }
         });
     }
 

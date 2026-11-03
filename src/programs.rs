@@ -51,6 +51,10 @@ struct Entry {
     /// (the `herdr.session` label); `{id}` is replaced by it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     resume_id: Vec<String>,
+    /// Space between the pane's edge and the terminal, in px: [x, y]. Overrides
+    /// the layout's `terminal_padding`; [0, 0] fills the pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_padding: Option<[f32; 2]>,
 }
 
 impl Entry {
@@ -72,6 +76,7 @@ impl Entry {
         if !mine.resume_id.is_empty() {
             self.resume_id = mine.resume_id;
         }
+        self.terminal_padding = mine.terminal_padding.or(self.terminal_padding);
     }
 }
 
@@ -183,6 +188,12 @@ pub fn load() -> Result<(), String> {
 /// program it runs (`argv`). `{ key, name, icon, tint, tile, color, shell, agent }`.
 pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
+}
+
+/// A program's own space around its terminal (programs.json `terminal_padding`),
+/// over the layout's.
+pub fn terminal_padding(key: &str) -> Option<[f32; 2]> {
+    TABLE.with(|t| t.borrow().programs.get(key).and_then(|e| e.terminal_padding))
 }
 
 /// How to start the agent `key` again where it was: its conversation `id` when
@@ -404,6 +415,17 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "herdr-has:issue57_function\nherdr-has:printf\n");
+    }
+
+    #[test]
+    fn a_program_may_set_its_own_terminal_padding() {
+        let mine: Entry = serde_json::from_str(r#"{"terminal_padding": [0, 0]}"#).unwrap();
+        let mut entry = Entry { terminal_padding: Some([14.0, 12.0]), ..Entry::default() };
+        entry.over(mine);
+        assert_eq!(entry.terminal_padding, Some([0.0, 0.0]));
+        // An entry that says nothing keeps it.
+        entry.over(Entry::default());
+        assert_eq!(entry.terminal_padding, Some([0.0, 0.0]));
     }
 
     #[test]
