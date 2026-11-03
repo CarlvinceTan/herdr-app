@@ -1191,8 +1191,11 @@ mod native {
             let _: () = msg_send![host, setFrame: frame];
             let _: () = msg_send![host, setHidden: YES];
         }
+        // The same hold as a drawn page: load only after the extensions (uBlock) are ready.
+        let url = normalize(url);
+        let held = hold_while_settling(id, &url);
         let nested = IN_CEF.replace(true);
-        let browser = create_browser(host, url, 1, 1, false);
+        let browser = create_browser(host, if held { "about:blank" } else { url.as_str() }, 1, 1, false);
         IN_CEF.set(nested);
         if !nested && PUMP_AGAIN.take() {
             schedule(0);
