@@ -93,6 +93,8 @@ pub struct TerminalView {
     pub right_click_to_program: bool,
     /// The program's own space around the terminal (programs.json), over the layout's.
     pub program_padding: Option<[f32; 2]>,
+    /// When a full-screen program last handed back the normal screen.
+    left_full_screen_at: Option<Instant>,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -188,6 +190,7 @@ impl TerminalView {
             link: None,
             right_click_to_program: false,
             program_padding: None,
+            left_full_screen_at: None,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -340,6 +343,13 @@ impl TerminalView {
         &self.focus
     }
 
+    /// Just after a full-screen program left (its shell is drawing again): a
+    /// listing can still name that program for a moment, and must not take the
+    /// layout padding away again.
+    pub fn left_full_screen_recently(&self) -> bool {
+        self.left_full_screen_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+    }
+
     pub fn detach(&self) {
         let g = self.grid.borrow();
         if let Some(ch) = g.channel {
@@ -395,6 +405,7 @@ impl TerminalView {
         // terminal listing, so it never draws once without it.
         if left_full_screen && self.program_padding.is_some() {
             self.program_padding = None;
+            self.left_full_screen_at = Some(Instant::now());
             cx.notify();
         }
         if let Some(title) = title {

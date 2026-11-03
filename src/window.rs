@@ -1937,6 +1937,9 @@ impl AppWindow {
         let running: Vec<String> = self.live.get(addr).and_then(Value::as_object).and_then(running_argv)
             .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
         let padding = crate::programs::of(None, &running)["key"].as_str().and_then(crate::programs::terminal_padding);
+        // A just-exited full-screen program can still be in this listing: don't
+        // take the shell's padding away for one more look.
+        let padding = if padding == Some([0.0, 0.0]) && view.read(cx).left_full_screen_recently() { None } else { padding };
         view.update(cx, |v, cx| {
             v.cwd = cwd;
             v.right_click_to_program = to_program;
