@@ -56,7 +56,12 @@
           if (s.t > 0.5) el.currentTime = s.t;
           el.muted = Boolean(s.muted);
           if (s.rate) el.playbackRate = s.rate;
-          if (!s.paused) el.play().catch(() => {});
+          if (!s.paused) {
+            el.play().catch(() => {
+              // Autoplay was blocked before the person touched the page: resume on the first click.
+              addEventListener("pointerdown", () => el.play().catch(() => {}), { capture: true, once: true });
+            });
+          }
         } catch {}
       };
       if (el.readyState >= 1) apply();
