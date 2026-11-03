@@ -1409,6 +1409,7 @@ impl AppWindow {
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::FullScreen => this.refresh_term_padding(&addr, cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -1931,12 +1932,7 @@ impl AppWindow {
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
-        // A program's padding follows what runs in the foreground now. The agent's
-        // own report outlives the agent (a shell shows `opencode`'s app after it
-        // exits), which would leave that shell without the layout's padding.
-        let running: Vec<String> = self.live.get(addr).and_then(Value::as_object).and_then(running_argv)
-            .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        let padding = crate::programs::of(None, &running)["key"].as_str().and_then(crate::programs::terminal_padding);
+        let padding = self.live.get(addr).and_then(padding_for_record);
         // A just-exited full-screen program can still be in this listing: don't
         // take the shell's padding away for one more look.
         let padding = if padding == Some([0.0, 0.0]) && view.read(cx).left_full_screen_recently() { None } else { padding };
@@ -1948,6 +1944,27 @@ impl AppWindow {
                 cx.notify();
             }
         });
+    }
+
+    /// A terminal just took the full screen: read what runs now and give it its
+    /// own padding, without waiting for the next listing.
+    fn refresh_term_padding(&mut self, addr: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.terms.values().find(|t| t.address == addr).map(|t| t.view.clone()) else { return };
+        let core = self.core.clone();
+        let terminal = addr.to_owned();
+        cx.spawn(async move |_this, cx| {
+            let asked = terminal.clone();
+            let record = cx.background_executor().spawn(async move { core.call("terminal.get", json!({ "terminal": asked })) }).await;
+            let Ok(record) = record else { return };
+            let _ = view.update(cx, |v, cx| {
+                let padding = padding_for_record(&record);
+                if v.program_padding != padding {
+                    v.program_padding = padding;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn terminals_listed(&mut self, v: Value, window: &mut Window, cx: &mut Context<Self>) {
@@ -4770,6 +4787,14 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
 /// What a terminal runs now (core's `foreground`), else what it started with.
 fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
     rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).or_else(|| rec.get("argv"))
+}
+
+/// A terminal's program padding from a core record: the program in the
+/// foreground now, not the agent's last report (which can outlive it).
+fn padding_for_record(rec: &Value) -> Option<[f32; 2]> {
+    let running: Vec<String> = rec.as_object().and_then(running_argv)
+        .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+    crate::programs::of(None, &running)["key"].as_str().and_then(crate::programs::terminal_padding)
 }
 
 /// Whether the core's record still puts a terminal in this space and tab and

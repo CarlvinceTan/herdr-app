@@ -35,6 +35,8 @@ enum LinkTarget {
 pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
+    /// A program took the full screen (or handed it back): its look may differ now.
+    FullScreen,
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
@@ -360,7 +362,7 @@ impl TerminalView {
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
-        let (title, left_full_screen) = {
+        let (title, left_full_screen, entered_full_screen) = {
             let mut g = self.grid.borrow_mut();
             let was_full_screen = g.vt.alt_screen();
             for item in batch {
@@ -398,7 +400,7 @@ impl TerminalView {
                     }
                 }
             }
-            (g.vt.take_title(), was_full_screen && !g.vt.alt_screen())
+            (g.vt.take_title(), was_full_screen && !g.vt.alt_screen(), !was_full_screen && g.vt.alt_screen())
         };
         // A full-screen program that exits (OpenCode back to its shell) hands back
         // the normal screen; give it the layout's padding now, not at the next
@@ -407,6 +409,11 @@ impl TerminalView {
             self.program_padding = None;
             self.left_full_screen_at = Some(Instant::now());
             cx.notify();
+        }
+        // A program that just took the full screen (OpenCode) may have its own
+        // padding; ask what runs now, not at the next listing, so it starts right.
+        if entered_full_screen {
+            cx.emit(TerminalEvent::FullScreen);
         }
         if let Some(title) = title {
             let title = if title.is_empty() { self.address.clone() } else { title };
