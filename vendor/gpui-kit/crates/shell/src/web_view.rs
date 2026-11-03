@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, is_private, normal_url, on_click, pages, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, normal_url, on_click, pages, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -61,6 +61,7 @@ mod native {
     pub fn on_click(_: impl Fn(String) + 'static) {}
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
+    pub fn ids() -> Vec<String> { Vec::new() }
     pub fn set_suspended(_: bool) {}
     pub fn set_undrawn(_: std::collections::HashSet<String>) {}
     pub fn begin_covers(_: bool) {}
@@ -1162,6 +1163,11 @@ mod native {
     }
 
     /// Each page's id, address, title, when it last asked for the address bar, and if it's on show.
+    /// Every page's id, without asking the pages anything.
+    pub fn ids() -> Vec<String> {
+        VIEWS.with_borrow(|views| views.keys().cloned().collect())
+    }
+
     pub fn pages() -> Vec<(String, String, String, u64, bool)> {
         let suspended = SUSPENDED.get();
         VIEWS.with_borrow_mut(|views| {

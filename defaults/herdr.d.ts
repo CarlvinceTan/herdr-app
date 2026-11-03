@@ -185,6 +185,8 @@ export interface PaneInfo {
    *  pane, mod, tab, title, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
+  /** A mod pane's props (what it was opened with). */
+  props?: Record<string, unknown>;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;

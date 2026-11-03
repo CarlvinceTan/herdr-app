@@ -1650,8 +1650,8 @@ impl AppWindow {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
                     // A mod pane: what it shows, no terminal.
-                    if let Some(Content::Mod { name, .. }) = p.content() {
-                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
+                    if let Some(Content::Mod { name, props }) = p.content() {
+                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "props": props, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
                     let Some(addr) = p.terminal() else { continue };
@@ -4282,14 +4282,24 @@ impl AppWindow {
 
     /// Browser pages (by my-browser's slot, shared "browser.slots": pane to slot) whose panes this
     /// frame doesn't draw: another tab's, or beside a zoomed pane. They hide in the same frame.
+    /// Every page but those of the panes on show. A page draws over everything, so one whose pane
+    /// went (or never told the browser mods its slot) must not stay where that pane was.
     fn undrawn_pages(&self) -> std::collections::HashSet<String> {
-        let Some(Value::Object(slots)) = crate::mods::shared("browser.slots") else { return Default::default() };
+        let slots = match crate::mods::shared("browser.slots") { Some(Value::Object(slots)) => slots, _ => Default::default() };
         let tab = self.model.active_space().and_then(|s| s.active_tab());
-        let drawn = |pane: &str| tab.is_some_and(|t| match t.zoomed.as_deref() {
-            Some(zoomed) => zoomed == pane,
-            None => t.root.find(pane).is_some(),
-        });
-        slots.iter().filter(|(pane, _)| !drawn(pane)).map(|(_, slot)| slot.to_string()).collect()
+        let drawn: Vec<&Node> = tab.map(|t| match t.zoomed.as_deref() {
+            Some(zoomed) => t.root.find(zoomed).into_iter().collect(),
+            None => t.root.panes(),
+        }).unwrap_or_default();
+        let claimed: HashSet<String> = drawn.iter().flat_map(|p| {
+            let listed = slots.get(&p.id).map(|slot| slot.to_string());
+            let own = match p.content() {
+                Some(Content::Mod { props, .. }) => props.get("slot").and_then(Value::as_u64).map(|slot| slot.to_string()),
+                _ => None,
+            };
+            listed.into_iter().chain(own)
+        }).collect();
+        gpui_shell::web_view::ids().into_iter().filter(|id| !claimed.contains(id)).collect()
     }
 
     fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
