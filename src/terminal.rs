@@ -1154,6 +1154,20 @@ fn spare_above(pad_y: f32, spare: f32) -> f32 {
     if pad_y == 0.0 { 0.0 } else { (spare / 2.0).floor() }
 }
 
+/// The background a row mostly shows: what a TUI paints below its last line, so
+/// the leftover pixels under the grid don't show the terminal's own color instead.
+fn most_common_bg(row: &[vt::Cell]) -> Option<Rgb> {
+    let mut counts: Vec<(Rgb, usize)> = Vec::new();
+    for cell in row {
+        let Some(bg) = cell.bg else { continue };
+        match counts.iter_mut().find(|(color, _)| *color == bg) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((bg, 1)),
+        }
+    }
+    counts.into_iter().max_by_key(|&(_, n)| n).map(|(bg, _)| bg)
+}
+
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, pad: (f32, f32), focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
@@ -1256,6 +1270,15 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, pad: (f32, f32),
                     let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
                 }
             }
+        }
+    }
+    // A program that fills its own background (a TUI) stops at the last whole
+    // row; color the leftover under it so it doesn't read as a gap.
+    if pad_y == 0.0 && spare > 0.0 {
+        if let Some(row) = frame.rows.last() {
+            let bg = most_common_bg(row).unwrap_or(frame.bg);
+            let strip = Bounds::new(at(0, frame.rows.len()), size(cell.width * row.len() as f32, px(spare)));
+            window.paint_quad(fill(snap_box(strip), hsla(bg)));
         }
     }
     {
@@ -2078,6 +2101,16 @@ mod tests {
     fn a_grid_without_top_padding_starts_at_the_top() {
         assert_eq!(super::spare_above(0.0, 9.0), 0.0);
         assert_eq!(super::spare_above(6.0, 9.0), 4.0);
+    }
+
+    #[test]
+    fn a_row_bleeds_its_most_common_background() {
+        let cell = |bg| super::vt::Cell {
+            text: String::new(), fg: super::Rgb(0, 0, 0), bg,
+            bold: false, italic: false, faint: false, underline: false, strike: false, wide: false,
+        };
+        assert_eq!(super::most_common_bg(&[cell(Some(super::Rgb(1, 1, 1))), cell(Some(super::Rgb(2, 2, 2))), cell(Some(super::Rgb(1, 1, 1)))]), Some(super::Rgb(1, 1, 1)));
+        assert_eq!(super::most_common_bg(&[cell(None)]), None);
     }
 
     #[test]

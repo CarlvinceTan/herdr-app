@@ -118,18 +118,64 @@
   }
 
   // A code split across one-character boxes goes in box by box.
-  function fillCode(field, code) {
-    const boxes = field.maxLength === 1
+  function codeBoxes(field) {
+    return field.maxLength === 1
       ? [...(field.form ?? field.parentElement?.parentElement ?? document).querySelectorAll("input")].filter((el) => el.maxLength === 1 && visible(el))
       : [field];
+  }
+
+  function fillCode(field, code) {
+    const boxes = codeBoxes(field);
     if (boxes.length > 1) [...code].forEach((digit, i) => boxes[i] && setValue(boxes[i], digit));
     else setValue(field, code);
   }
 
-  async function codeFrom(field, account) {
+  async function codeFrom(field, account, submit = false) {
     hide();
     const got = await ask({ type: "code", title: account.title });
-    if (got?.code) fillCode(field, got.code);
+    if (!got?.code) return;
+    fillCode(field, got.code);
+    if (submit) submitCode(field, account);
+  }
+
+  // A code the page rejects: it clears the field or shows why. Offer the code
+  // again, and this time fill only: the person presses Verify themselves.
+  const CODE_RETRY_MS = 8_000;
+  const CODE_REJECTED = /(didn'?t work|incorrect|invalid|wrong|expired|not valid|try again|code.*(?:error|fail)|error.*code)/i;
+  function submitCode(field, account) {
+    const form = field.form ?? field.closest("form");
+    const scope = form ?? document.body;
+    let done = false;
+    const offerAgain = () => {
+      if (done) return;
+      done = true;
+      stop();
+      const boxes = codeBoxes(field);
+      for (const box of boxes) if (box.value) setValue(box, "");
+      if (boxes.includes(document.activeElement)) {
+        setTimeout(() => show(field, [{ label: "Use verification code", pick: () => codeFrom(field, account) }]), 0);
+      }
+    };
+    const onInput = () => { if (!field.value) offerAgain(); };
+    const observer = new MutationObserver((mutations) => {
+      // Only what the page adds after the submit: an "Error" already on it isn't this code's.
+      const text = mutations
+        .flatMap((m) => [...m.addedNodes].map((n) => n.textContent ?? "").concat(m.type === "characterData" ? m.target.textContent ?? "" : []))
+        .join(" ");
+      if (text && CODE_REJECTED.test(text)) offerAgain();
+    });
+    const timer = setTimeout(stop, CODE_RETRY_MS);
+    function stop() {
+      field.removeEventListener("input", onInput);
+      observer.disconnect();
+      clearTimeout(timer);
+    }
+    field.addEventListener("input", onInput);
+    observer.observe(scope, { childList: true, subtree: true, characterData: true });
+    // What the person does: submit the form (Enter or the Verify button).
+    const button = form?.querySelector('input[type="submit"], button[type="submit"], button:not([type])');
+    if (button) button.click();
+    else if (form) form.requestSubmit();
   }
 
   // A code field: the site's vault codes, and a recent one from Messages. One that's plainly this
@@ -140,7 +186,7 @@
     if (document.activeElement !== field) return;
     const totp = accounts.filter((account) => account.totp);
     if (fromMessages?.code && fromMessages.forSite && firstOffer(scope, "code")) return fillCode(field, fromMessages.code);
-    if (!fromMessages?.code && totp.length === 1 && firstOffer(scope, "code")) return codeFrom(field, totp[0]);
+    if (!fromMessages?.code && totp.length === 1 && firstOffer(scope, "code")) return codeFrom(field, totp[0], true);
     const rows = totp.map((account) => ({
       // This menu only fills the code field: say so, instead of looking like another account.
       label: totp.length === 1 ? "Use verification code" : `Use code from ${account.title}`,
