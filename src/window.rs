@@ -4816,6 +4816,12 @@ fn adoptable(record: &Value, space: &str, tab: Option<&str>, machine: Option<&st
 fn program_of(report: &Value, argv: Option<&Value>) -> Value {
     let app = report.get("app").and_then(Value::as_str);
     let argv: Vec<String> = argv.and_then(Value::as_array).into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect();
+    // An agent's report outlives its process: once a shell is in front again,
+    // show the shell, not the agent that started it.
+    let running = crate::programs::of(None, &argv);
+    if app.is_some() && running["key"].as_str() == Some("shell") {
+        return running;
+    }
     crate::programs::of(app, &argv)
 }
 
@@ -5007,6 +5013,15 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_finished_agent_shows_the_shell_back_in_front() {
+        let report = json!({ "app": "opencode", "state": "idle" });
+        assert_eq!(super::program_of(&report, Some(&json!(["/bin/zsh", "-l"])))["key"], "shell");
+        assert_eq!(super::program_of(&report, Some(&json!(["opencode"])))["key"], "opencode");
+        assert_eq!(super::program_of(&json!({}), Some(&json!(["/bin/zsh"])))["key"], "shell");
+    }
 
     #[test]
     fn going_back_into_a_split_column_takes_its_top_pane_whatever_the_fractions() {
