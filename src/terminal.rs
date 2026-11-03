@@ -415,6 +415,16 @@ impl TerminalView {
         if entered_full_screen {
             cx.emit(TerminalEvent::FullScreen);
         }
+        // OpenCode titles itself before its first frame: give it its own padding now,
+        // without waiting for the core round trip, so it never draws padded once.
+        if let Some(raw) = title.as_deref()
+            && raw.starts_with("OC | ")
+            && let Some(padding) = crate::programs::terminal_padding("opencode")
+            && self.program_padding != Some(padding)
+        {
+            self.program_padding = Some(padding);
+            cx.notify();
+        }
         if let Some(title) = title {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
