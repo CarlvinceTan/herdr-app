@@ -3069,7 +3069,7 @@ impl AppWindow {
                 if c.root.find(&pane).is_some_and(|n| !n.closable()) {
                     return;
                 }
-                if c.root.panes().len() == 1 && self.model.pane_chooser.is_none() {
+                if c.root.panes().len() == 1 && (self.model.is_chooser(&pane) || self.model.pane_chooser.is_none()) {
                     let id = c.id.clone();
                     return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
                 }
