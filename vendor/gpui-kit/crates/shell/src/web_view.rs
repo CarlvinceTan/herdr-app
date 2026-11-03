@@ -1162,12 +1162,12 @@ mod native {
         }
     }
 
-    /// Each page's id, address, title, when it last asked for the address bar, and if it's on show.
     /// Every page's id, without asking the pages anything.
     pub fn ids() -> Vec<String> {
         VIEWS.with_borrow(|views| views.keys().cloned().collect())
     }
 
+    /// Each page's id, address, title, when it last asked for the address bar, and if it's on show.
     pub fn pages() -> Vec<(String, String, String, u64, bool)> {
         let suspended = SUSPENDED.get();
         VIEWS.with_borrow_mut(|views| {
