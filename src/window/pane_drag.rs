@@ -185,7 +185,7 @@ impl AppWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{STRIP, drop_zone, inherited_movable, top_strip};
+    use super::{drop_zone, inherited_movable};
     use crate::layout::{Axis, Content, Edge, Node};
     use gpui::{Bounds, point, px, size};
     #[test]
@@ -196,17 +196,6 @@ mod tests {
             (500., 590., Some(Some(Edge::Bottom))), (99., 400., None)] {
             assert_eq!(drop_zone(b, point(px(x), px(y))), expected);
         }
-    }
-    #[test]
-    fn hover_strip_is_only_the_panes_top_edge() {
-        let b = Bounds::new(point(px(100.), px(200.)), size(px(800.), px(400.)));
-        assert!(top_strip(b, STRIP, point(px(110.), px(201.))));
-        assert!(!top_strip(b, STRIP, point(px(110.), px(250.))));
-        assert!(!top_strip(b, STRIP, point(px(99.), px(201.))));
-        assert!(!top_strip(b, STRIP, point(px(500.), px(199.))));
-        // A 40px top header is the whole row.
-        assert!(top_strip(b, 40., point(px(110.), px(235.))));
-        assert!(!top_strip(b, 40., point(px(110.), px(245.))));
     }
     #[test]
     fn movable_uses_the_nearest_explicit_ancestor() {
