@@ -1918,18 +1918,21 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 _browser: Option<&mut Browser>,
                 _frame: Option<&mut Frame>,
                 _request: Option<&mut Request>,
-                _is_navigation: ::std::os::raw::c_int,
+                is_navigation: ::std::os::raw::c_int,
                 _is_download: ::std::os::raw::c_int,
                 _request_initiator: Option<&CefString>,
                 _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
             ) -> Option<ResourceRequestHandler> {
-                Some(PrivateRequests::new())
+                // The page itself always loads; only what it pulls in is filtered.
+                Some(PrivateRequests::new(is_navigation != 0))
             }
         }
     }
 
     wrap_resource_request_handler! {
-        struct PrivateRequests;
+        struct PrivateRequests {
+            navigation: bool,
+        }
 
         impl ResourceRequestHandler {
             fn on_before_resource_load(
@@ -1939,6 +1942,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 request: Option<&mut Request>,
                 _callback: Option<&mut Callback>,
             ) -> ReturnValue {
+                if self.navigation { return ReturnValue::CONTINUE }
                 let Some(request) = request else { return ReturnValue::CONTINUE };
                 let url = CefString::from(&request.url()).to_string();
                 if host_blocked(&host_of_url(&url)) { ReturnValue::CANCEL } else { ReturnValue::CONTINUE }
@@ -2012,7 +2016,8 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 let mut hosts: Vec<String> = Vec::new();
                 if let Some(domains) = condition["requestDomains"].as_array() {
                     for domain in domains.iter().filter_map(|domain| domain.as_str()) {
-                        if domain.is_empty() || domain.starts_with('~') { continue }
+                        // A bare label would take a whole TLD with it.
+                        if domain.contains('.') == false || domain.starts_with('~') { continue }
                         hosts.push(domain.to_owned());
                     }
                 }
