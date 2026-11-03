@@ -247,6 +247,80 @@ mod native {
         manifest["version"].as_str().map(|v| v.split('.').filter_map(|p| p.parse().ok()).collect())
     }
 
+    // uBO clears its content scripts and registers them again on every start. A page loaded
+    // inside that window gets no scriptlets, and a preloaded YouTube page then keeps its ads.
+    // The set persists from the last run, so the patch leaves it alone when it matches.
+    fn patch_ublock(dir: &Path) {
+        const MARK: &str = "// Herdr: keep unchanged content scripts registered.";
+        let file = dir.join("js/scripting-manager.js");
+        let Ok(text) = std::fs::read_to_string(&file) else { return };
+        if text.contains(MARK) {
+            return;
+        }
+        const OLD: &str = r#"    ubolLog(`Unregistered all content (css/js)`);
+    try {
+        await browser.scripting.unregisterContentScripts();
+    } catch(reason) {
+        ubolErr(`unregisterContentScripts/${reason}`);
+    }
+
+    if ( toAdd.length !== 0 ) {
+        ubolLog(`Registered ${toAdd.map(v => v.id)} content (css/js)`);
+        try {
+            await browser.scripting.registerContentScripts(toAdd);
+        } catch(reason) {
+            ubolErr(`registerContentScripts/${reason}`);
+        }
+    }
+"#;
+        const NEW: &str = r#"    // Herdr: keep unchanged content scripts registered.
+    // Clearing and re-adding them on every start leaves a window where a page loads with
+    // no scriptlets at all; a preloaded page then keeps its ads. The set persists from the
+    // last run, so leave it alone when it matches.
+    let sameSet = false;
+    if ( toAdd.length !== 0 ) {
+        const known = await browser.scripting.getRegisteredContentScripts().catch(( ) => []);
+        const canon = a => JSON.stringify([
+            a.id,
+            a.js ?? [],
+            a.css ?? [],
+            a.matches ?? [],
+            a.excludeMatches ?? [],
+            a.runAt ?? 'document_idle',
+            a.world ?? 'ISOLATED',
+            a.allFrames === true,
+            a.matchOriginAsFallback === true,
+            a.persistAcrossSessions !== false,
+        ]);
+        if ( known.length === toAdd.length ) {
+            const have = new Set(known.map(canon));
+            sameSet = toAdd.every(a => have.has(canon(a)));
+        }
+    }
+    if ( sameSet === false ) {
+        ubolLog(`Unregistered all content (css/js)`);
+        try {
+            await browser.scripting.unregisterContentScripts();
+        } catch(reason) {
+            ubolErr(`unregisterContentScripts/${reason}`);
+        }
+
+        if ( toAdd.length !== 0 ) {
+            ubolLog(`Registered ${toAdd.map(v => v.id)} content (css/js)`);
+            try {
+                await browser.scripting.registerContentScripts(toAdd);
+            } catch(reason) {
+                ubolErr(`registerContentScripts/${reason}`);
+            }
+        }
+    }
+"#;
+        if !text.contains(OLD) {
+            return;
+        }
+        let _ = std::fs::write(&file, text.replacen(OLD, NEW, 1));
+    }
+
     fn apply_ublock_update() {
         let dir = state_dir();
         let next = dir.join("ublock.next");
@@ -305,6 +379,7 @@ mod native {
             .status().map(|s| s.success()).unwrap_or(false);
         let _ = std::fs::remove_file(&zip);
         if ok && staging.join("manifest.json").is_file() {
+            patch_ublock(&staging);
             let _ = std::fs::write(&stamp, tag);
         } else {
             let _ = std::fs::remove_dir_all(&staging);
@@ -694,6 +769,7 @@ mod native {
             return true;
         }
         apply_ublock_update();
+        patch_ublock(&state_dir().join("ublock"));
         {
             // Chromium needs to find the app it can talk to, not a plain one it would make itself.
             let _: Id = unsafe { msg_send![class!(GPUIApplication), sharedApplication] };
