@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Herdr: resume pages",
+  "version": "1",
+  "description": "Keeps a page's scroll and media position across Herdr restarts.",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["page-state.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
