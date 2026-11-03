@@ -41,50 +41,26 @@ impl AppWindow {
             .unwrap_or(true)
     }
 
-    pub(super) fn pane_grip(&self, pane: &str, header: Option<f32>, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Where the pane's header ends, for a Cmd-drag on it. No grip is drawn any more.
+    pub(super) fn pane_grip(&self, pane: &str, header: Option<f32>, _cx: &mut Context<Self>) -> Option<AnyElement> {
         let row = header.unwrap_or(STRIP).max(STRIP);
         self.pane_grip_rows.borrow_mut().insert(pane.to_owned(), row);
-        if !self.pane_movable(pane) { return None; }
-        let dragging = self.pane_drag.as_ref().is_some_and(|d| d.pane == pane);
-        if self.pane_grip_hover.as_deref() != Some(pane) && !dragging { return None; }
-        let pane = pane.to_owned();
-        Some(div().id(SharedString::from(format!("grip-{pane}")))
-            .absolute().top(settings::z((row - 18.) / 2.)).left(relative(0.5)).ml(-settings::z(14.))
-            .w(settings::z(28.)).h(settings::z(18.)).rounded(settings::z(4.))
-            .bg(c("background").opacity(0.85))
-            .hover(|s| s.bg(c("hover")))
-            .flex().flex_col().items_center().justify_center().gap(settings::z(3.)).occlude()
-            .group("pane-grip")
-            .cursor(if dragging { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                this.pane_press(&pane, ev.position, cx);
-                cx.stop_propagation();
-            }))
-            .children((0..2).map(|_| div().flex().gap(settings::z(3.)).children((0..3).map(|_| div().size(settings::z(2.)).rounded_full()
-                .bg(if dragging { c("foreground") } else { c("dim") })
-                .group_hover("pane-grip", |s| s.bg(c("foreground")))))))
-            .into_any_element())
+        None
     }
 
-    fn pane_hover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let hovered = self.model.active_tab().and_then(|tab| {
-            let bounds = self.bounds.borrow();
-            let rows = self.pane_grip_rows.borrow();
-            tab.shown().visible_blocks().into_iter().find_map(|n| {
-                let b = bounds.get(&n.id)?;
-                let row = rows.get(&n.id).copied().unwrap_or(STRIP);
-                // Only over the grip itself (28 x 18 at the top middle), not the header.
-                let centre = f32::from(b.origin.x) + f32::from(b.size.width) / 2.0;
-                let top = f32::from(b.origin.y) + f32::from(settings::z((row - 18.0) / 2.0));
-                let near = (f32::from(at.x) - centre).abs() <= f32::from(settings::z(14.0))
-                    && f32::from(at.y) >= top && f32::from(at.y) <= top + f32::from(settings::z(18.0));
-                (near && self.pane_movable(&n.id)).then(|| n.id.clone())
-            })
-        });
-        if hovered != self.pane_grip_hover {
-            self.pane_grip_hover = hovered;
-            cx.notify();
-        }
+    /// A pane whose header holds this point: Cmd-dragging there moves the pane.
+    fn pane_header_at(&self, at: Point<Pixels>) -> Option<String> {
+        let tab = self.model.active_tab()?;
+        if tab.zoomed.is_some() { return None; }
+        let bounds = self.bounds.borrow();
+        let rows = self.pane_grip_rows.borrow();
+        tab.shown().visible_blocks().into_iter().find_map(|n| {
+            let b = *bounds.get(&n.id)?;
+            let row = rows.get(&n.id).copied().unwrap_or(STRIP);
+            let inside = at.x >= b.origin.x && at.x <= b.origin.x + b.size.width
+                && at.y >= b.origin.y && at.y <= b.origin.y + settings::z(row);
+            (inside && self.pane_movable(&n.id)).then(|| n.id.clone())
+        })
     }
 
     pub(super) fn pane_press(&mut self, pane: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -167,10 +143,24 @@ impl AppWindow {
                 window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         let _ = t.update(cx, |this, cx| {
-                            this.pane_hover(ev.position, cx);
                             this.pane_move(ev.position, ev.pressed_button == Some(MouseButton::Left), cx);
                         });
                     }
+                });
+                // Cmd over a pane's header starts the same drag the grip used to.
+                let t = this.clone();
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture || ev.button != MouseButton::Left || !ev.modifiers.platform {
+                        return;
+                    }
+                    let _ = t.update(cx, |this, cx| {
+                        // Under a popup or a floating mod its own press wins.
+                        if !this.overlays.is_empty() || !this.float_hover.is_empty() { return; }
+                        if let Some(pane) = this.pane_header_at(ev.position) {
+                            this.pane_press(&pane, ev.position, cx);
+                            cx.stop_propagation();
+                        }
+                    });
                 });
                 let t = this.clone();
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {

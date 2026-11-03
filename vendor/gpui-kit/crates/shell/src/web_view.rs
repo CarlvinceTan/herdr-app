@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_private, order_back, normal_url, on_click, on_fullscreen, pages, preload, set_background, set_fullscreen, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -60,6 +60,7 @@ mod native {
     pub fn command(_: &str, _: &str, _: &str) {}
     pub fn on_click(_: impl Fn(String) + 'static) {}
     pub fn on_fullscreen(_: impl Fn(String, bool) + 'static) {}
+    pub fn on_zoom(_: impl Fn() + 'static) {}
     pub fn set_fullscreen(_: &str, _: bool) {}
     pub fn helper_main() {}
     pub fn start(_: i32) -> bool { false }
@@ -206,6 +207,8 @@ mod native {
         static CLICK: RefCell<Option<Box<dyn Fn(String)>>> = const { RefCell::new(None) };
         // A page entered or left fullscreen, with the pane it belongs to.
         static FULLSCREEN_CALLBACK: RefCell<Option<Box<dyn Fn(String, bool)>>> = const { RefCell::new(None) };
+        // Cmd-E in a page: the pane holding it zooms, as it does anywhere else in the window.
+        static ZOOM_CALLBACK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
         static SUSPENDED: Cell<bool> = const { Cell::new(false) };
         static LAST_CLICK: Cell<f64> = const { Cell::new(0.0) };
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
@@ -1230,6 +1233,14 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 ("\u{f702}", _) => browser.go_back(),
                 ("\u{f703}", _) => browser.go_forward(),
                 ("l", _) => view.asked = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis() as u64),
+                ("e", _) => {
+                    // The pane holding this page, not the page: the app zooms its focused pane.
+                    ZOOM_CALLBACK.with_borrow(|callback| {
+                        if let Some(callback) = callback {
+                            callback();
+                        }
+                    });
+                }
                 _ => return false,
             }
             true
@@ -1756,6 +1767,10 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
 
     pub fn on_fullscreen(callback: impl Fn(String, bool) + 'static) {
         FULLSCREEN_CALLBACK.with_borrow_mut(|slot| *slot = Some(Box::new(callback)));
+    }
+
+    pub fn on_zoom(callback: impl Fn() + 'static) {
+        ZOOM_CALLBACK.with_borrow_mut(|slot| *slot = Some(Box::new(callback)));
     }
 
     // A browser's own record of what's on show. Its display callbacks don't arrive for a page in a
