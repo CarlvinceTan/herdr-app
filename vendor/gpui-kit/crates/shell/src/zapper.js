@@ -43,7 +43,7 @@
 #${DOCK} button:disabled { opacity: .35; cursor: default; background: none; }
 #${DOCK} svg { width: 16px; height: 16px; }
 .herdr-zapper-highlight { position: fixed; z-index: 2147483646; pointer-events: none;
-  border: 2px solid ${ACCENT}; background: rgba(59,130,246,.15); border-radius: 4px; }
+  border: 2px solid ${ACCENT}; background: rgba(59,130,246,.26); border-radius: 4px; }
 `;
   (document.head || document.documentElement).appendChild(style);
 
