@@ -352,6 +352,11 @@ impl TerminalView {
         self.left_full_screen_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1))
     }
 
+    /// Whether a full-screen program (its alternate screen) holds the screen now.
+    pub fn in_full_screen(&self) -> bool {
+        self.grid.borrow().vt.alt_screen()
+    }
+
     pub fn detach(&self) {
         let g = self.grid.borrow();
         if let Some(ch) = g.channel {

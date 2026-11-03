@@ -1979,7 +1979,13 @@ impl AppWindow {
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
-        let padding = self.live.get(addr).and_then(padding_for_record);
+        let record = self.live.get(addr);
+        let mut padding = record.and_then(padding_for_record);
+        // A full-screen program reports itself (OSC 7501) before the core can see
+        // it in front: while it holds the screen, its report says what runs there.
+        if padding.is_none() && view.read(cx).in_full_screen() {
+            padding = record.and_then(reported_padding);
+        }
         // A just-exited full-screen program can still be in this listing: don't
         // take the shell's padding away for one more look.
         let padding = if padding == Some([0.0, 0.0]) && view.read(cx).left_full_screen_recently() { None } else { padding };
@@ -1988,14 +1994,30 @@ impl AppWindow {
             v.right_click_to_program = to_program;
             if v.program_padding != padding {
                 v.program_padding = padding;
+                cx.notify();
             }
         });
     }
 
-    /// A terminal just took the full screen: read what runs now and give it its
-    /// own padding, without waiting for the next listing.
+    /// A terminal just took the full screen: give it the program's own padding,
+    /// without waiting for the next listing or a round trip to the core.
     fn refresh_term_padding(&mut self, addr: &str, cx: &mut Context<Self>) {
         let Some(view) = self.terms.values().find(|t| t.address == addr).map(|t| t.view.clone()) else { return };
+        // Entering the full screen and its first frame come together, and the
+        // report that names the program came earlier: the listing already knows
+        // it. Waiting for the core here let a padded frame show first, then jump.
+        if !view.read(cx).in_full_screen() { return; }
+        let local = self.live.get(addr).and_then(|r| padding_for_record(r).or_else(|| reported_padding(r)));
+        if let Some(padding) = local {
+            view.update(cx, |v, cx| {
+                if v.program_padding != Some(padding) {
+                    v.program_padding = Some(padding);
+                    cx.notify();
+                }
+            });
+            return;
+        }
+        // The listing names nothing yet: ask the core, which may see it sooner.
         let core = self.core.clone();
         let terminal = addr.to_owned();
         cx.spawn(async move |_this, cx| {
@@ -2003,14 +2025,11 @@ impl AppWindow {
             let record = cx.background_executor().spawn(async move { core.call("terminal.get", json!({ "terminal": asked })) }).await;
             let Ok(record) = record else { return };
             let _ = view.update(cx, |v, cx| {
-                // The foreground can lag the agent's own report by a moment; on
-                // entering the full screen the report is the program starting.
-                let padding = padding_for_record(&record).or_else(|| {
-                    record["status"]["app"].as_str().map(|app| crate::programs::agent_name(Some(app)))
-                        .and_then(|key| crate::programs::terminal_padding(&key))
-                });
+                if !v.in_full_screen() { return; }
+                let padding = padding_for_record(&record).or_else(|| reported_padding(&record));
                 if v.program_padding != padding {
                     v.program_padding = padding;
+                    cx.notify();
                 }
             });
         })
@@ -4878,6 +4897,19 @@ fn padding_for_record(rec: &Value) -> Option<[f32; 2]> {
     crate::programs::of(None, &running)["key"].as_str().and_then(crate::programs::terminal_padding)
 }
 
+/// The app that named itself to the core (OSC 7501) for this terminal: a
+/// listing keeps the report under `report`, a `terminal.get` record under `status`.
+fn reported_app(rec: &Value) -> Option<&str> {
+    rec.pointer("/report/app").or_else(|| rec.pointer("/status/app")).and_then(Value::as_str).filter(|a| !a.is_empty())
+}
+
+/// A terminal's program padding from that report: it says what runs before the
+/// core can see the program in front.
+fn reported_padding(rec: &Value) -> Option<[f32; 2]> {
+    let app = reported_app(rec)?;
+    crate::programs::terminal_padding(&crate::programs::agent_name(Some(app)))
+}
+
 /// Whether the core's record still puts a terminal in this space and tab and
 /// it still runs. A listing taken just before it ended still shows it running,
 /// and labels outlive the program: putting it back would show a dead pane.
@@ -5091,6 +5123,19 @@ mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
     use serde_json::json;
+
+    #[test]
+    fn a_program_that_reported_itself_gets_its_padding_before_the_core_sees_it() {
+        // A listing keeps the report as `report`, a `terminal.get` record as `status`.
+        let listed = json!({ "report": { "app": "opencode" } });
+        let fetched = json!({ "status": { "app": "opencode" } });
+        assert_eq!(super::reported_app(&listed), Some("opencode"));
+        assert_eq!(super::reported_app(&fetched), Some("opencode"));
+        assert_eq!(super::reported_padding(&listed), crate::programs::terminal_padding("opencode"));
+        // Nobody reporting, or an empty app: nothing to take.
+        assert_eq!(super::reported_app(&json!({ "report": { "app": "" } })), None);
+        assert_eq!(super::reported_padding(&json!({})), None);
+    }
 
     #[test]
     fn a_finished_agent_shows_the_shell_back_in_front() {
