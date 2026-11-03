@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Herdr: minimal Google",
+  "version": "1",
+  "description": "The Google home page without its site chrome, for a browser pane.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.google.com/*", "https://google.com/*"],
+      "css": ["minimal-google.css"],
+      "run_at": "document_start"
+    }
+  ]
+}

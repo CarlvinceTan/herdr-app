@@ -1667,6 +1667,11 @@ impl AppWindow {
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
                     }));
                     let Some(status) = m.status(addr) else { continue };
+                    // A stale agent report can outlive its process; a shell in front is a
+                    // terminal pane, not an agent row in the sidebar.
+                    if self.program(addr)["agent"].as_bool() != Some(true) {
+                        continue;
+                    }
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
@@ -2760,6 +2765,23 @@ impl AppWindow {
                         (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal }))
                     })
                     .collect::<serde_json::Map<String, Value>>();
+                let mut pages = pages;
+                // At startup and quit the pages can be gone before their panes are: keep
+                // the address each browser pane came back to instead of blanking it, so a
+                // pane whose page isn't up yet reopens where it was. A pane that's really
+                // gone loses its slot, and with it this entry (unless the slots haven't
+                // synced yet, just after launch).
+                static FIRST_REPORT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+                let settle = FIRST_REPORT.get_or_init(Instant::now).elapsed() < Duration::from_secs(10);
+                let slots = crate::mods::shared("browser.slots").and_then(|v| v.as_object().cloned()).unwrap_or_default();
+                let expected: HashSet<String> = slots.values().filter_map(|slot| slot.as_u64()).map(|slot| slot.to_string()).collect();
+                if let Some(old) = crate::mods::shared("web.pages").and_then(|v| v.as_object().cloned()) {
+                    for (id, page) in old {
+                        if !pages.contains_key(&id) && (expected.contains(&id) || (slots.is_empty() && settle)) {
+                            pages.insert(id, page);
+                        }
+                    }
+                }
                 let pages = Value::Object(pages);
                 if crate::mods::shared("web.pages").as_ref() != Some(&pages) {
                     crate::mods::set_shared("web.pages".into(), pages);

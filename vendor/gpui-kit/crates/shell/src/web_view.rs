@@ -87,10 +87,12 @@ mod native {
     use cef::{
         App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
-        ImplLifeSpanHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient, LifeSpanHandler, PopupFeatures, Rect as CefRect,
+        ImplLifeSpanHandler, ImplMediaAccessCallback, ImplPermissionHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient,
+        LifeSpanHandler, MediaAccessCallback, PermissionHandler, PopupFeatures, Rect as CefRect,
         RequestContext, RequestContextSettings, RuntimeStyle, Settings, Urlrequest, UrlrequestClient,
-        WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler, WrapUrlrequestClient,
-        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler, wrap_urlrequest_client,
+        WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler, WrapPermissionHandler,
+        WrapUrlrequestClient,
+        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler, wrap_permission_handler, wrap_urlrequest_client,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
     use objc::declare::ClassDecl;
@@ -255,7 +257,7 @@ mod native {
     // Herdr's own extensions, written out at start beside uBlock. The extensions page is one, since
     // only an extension may manage the others (Chrome's page doesn't open in a pane). Autofill is the
     // other: it fills from the user's vault through a native messaging host in the app.
-    const OWN_EXTENSIONS: [(&str, &[(&str, &str)]); 2] = [
+    const OWN_EXTENSIONS: [(&str, &[(&str, &str)]); 3] = [
         ("extensions-page", &[
             ("manifest.json", include_str!("extensions-page/manifest.json")),
             ("manage.html", include_str!("extensions-page/manage.html")),
@@ -267,6 +269,10 @@ mod native {
             ("background.js", include_str!("autofill/background.js")),
             ("content.js", include_str!("autofill/content.js")),
             ("webauthn.js", include_str!("autofill/webauthn.js")),
+        ]),
+        ("minimal-google", &[
+            ("manifest.json", include_str!("minimal-google/manifest.json")),
+            ("minimal-google.css", include_str!("minimal-google/minimal-google.css")),
         ]),
     ];
     const AUTOFILL_HOST: &str = "dev.herdr.autofill";
@@ -361,6 +367,8 @@ mod native {
                 switch("no-startup-window", None);
                 switch("hide-crash-restore-bubble", None);
                 switch("disable-features", Some(LEAN_FEATURES_OFF));
+                // Web pages in panes can use the microphone and camera (voice search, calls).
+                switch("enable-media-stream", None);
                 // HERDR_CHROMIUM_LOG=<vmodule spec> turns on Chromium's own logging, to stderr, for debugging.
                 if let Ok(modules) = std::env::var("HERDR_CHROMIUM_LOG") {
                     switch("enable-logging", Some("stderr"));
@@ -372,7 +380,10 @@ mod native {
                 if std::env::var_os("HERDR_KEEP_PAGES_AWAKE").is_some() || std::env::var_os("HERDR_BACKGROUND").is_some() {
                     switch("disable-backgrounding-occluded-windows", None);
                 }
-                let folders: Vec<String> = ["ublock".to_owned(), own_extension_folder("extensions-page"), own_extension_folder("autofill")]
+                let folders: Vec<String> = [
+                    "ublock".to_owned(), own_extension_folder("extensions-page"),
+                    own_extension_folder("autofill"), own_extension_folder("minimal-google"),
+                ]
                     .iter().map(|folder| state_dir().join(folder))
                     .filter(|folder| folder.join("manifest.json").exists())
                     .map(|folder| folder.to_string_lossy().into_owned()).collect();
@@ -404,6 +415,32 @@ mod native {
         impl Client {
             fn life_span_handler(&self) -> Option<LifeSpanHandler> {
                 Some(PagePopups::new())
+            }
+
+            fn permission_handler(&self) -> Option<PermissionHandler> {
+                Some(PagePermissions::new())
+            }
+        }
+    }
+
+    // A page that asks for the microphone or camera (voice search, a call) gets them: these are
+    // Herdr's own panes, and macOS still asks once for Herdr itself.
+    wrap_permission_handler! {
+        struct PagePermissions;
+
+        impl PermissionHandler {
+            fn on_request_media_access_permission(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                _origin: Option<&CefString>,
+                requested: u32,
+                callback: Option<&mut MediaAccessCallback>,
+            ) -> ::std::os::raw::c_int {
+                if let Some(callback) = callback {
+                    callback.cont(requested);
+                }
+                1
             }
         }
     }

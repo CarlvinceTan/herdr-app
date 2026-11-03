@@ -1,0 +1,7 @@
+/* A browser pane's home: the search box, without Google's site chrome. */
+.acUsEb.Qi40Vc.CoM3Df, /* About, Store, Gmail, Images, the apps and the account */
+.acUsEb.gwogMd,        /* the promo line and "Google offered in" */
+.Ij8KCd                /* the country and the footer links */
+{
+  display: none !important;
+}
