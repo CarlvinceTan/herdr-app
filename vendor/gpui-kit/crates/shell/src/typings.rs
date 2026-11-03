@@ -1153,6 +1153,8 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     local_position: Point;
     bounds: import("gpui-shell").ElementBounds;
     modifiers: Modifiers;
+    /** HERDR: the button held while moving, or null. */
+    pressed_button: "left" | "right" | "middle" | null;
   }
 
   /**
@@ -3164,6 +3166,8 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** HERDR: draw the scrollbar. Defaults to true. */
+      scrollbars?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */

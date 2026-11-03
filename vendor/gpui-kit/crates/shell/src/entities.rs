@@ -181,6 +181,8 @@ pub(crate) struct EditorOptions {
     pub folding: bool,
     pub readonly: bool,
     pub soft_wrap: bool,
+    /// HERDR: draw the editor's scrollbar (default true).
+    pub scrollbars: bool,
     pub syntax: HashMap<String, String>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -195,6 +197,7 @@ impl Default for EditorOptions {
             folding: true,
             readonly: false,
             soft_wrap: false,
+            scrollbars: true,
             syntax: HashMap::new(),
             font_family: None,
             font_size: None,
@@ -460,7 +463,8 @@ impl EntityStore {
                 .language(options.language)
                 .line_number(options.line_numbers)
                 .folding(options.folding)
-                .soft_wrap(options.soft_wrap);
+                .soft_wrap(options.soft_wrap)
+                .scrollbars(options.scrollbars);
             state.set_readonly(options.readonly, cx);
             state.set_editor_style(style);
             state.set_highlighter_factory(

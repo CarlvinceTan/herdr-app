@@ -437,6 +437,9 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
     pub(super) soft_wrap: bool,
+    /// HERDR: whether a multi-line input draws its scrollbar (an editor laid out at its file's full
+    /// size by its host, which scrolls it, has none of its own to show).
+    pub(super) scrollbars: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
     pub(super) cursor_surrounding_lines: Option<usize>,
@@ -679,7 +682,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// thumb inside every text field, which is a control the field does not
     /// have.
     pub(crate) fn shows_scrollbar(&self) -> bool {
-        self.is_multi_line()
+        self.is_multi_line() && self.scrollbars
     }
 
     pub fn is_multi_line(&self) -> bool {
@@ -812,6 +815,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             searchable: false,
             replaceable: true,
             soft_wrap: true,
+            scrollbars: true,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
             cursor_surrounding_lines: None,
@@ -11076,6 +11080,12 @@ impl<M: crate::input::MultiLineMode> InputBaseState<M> {
     #[doc(hidden)]
     pub fn soft_wrap(mut self, wrap: bool) -> Self {
         self.soft_wrap = wrap;
+        self
+    }
+
+    /// HERDR: whether this multi-line input draws its scrollbar (default true).
+    pub fn scrollbars(mut self, show: bool) -> Self {
+        self.scrollbars = show;
         self
     }
 
