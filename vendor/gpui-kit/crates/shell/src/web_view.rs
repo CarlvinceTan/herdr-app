@@ -2322,7 +2322,8 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 let (Some(browser), Some(frame), Some(context)) = (browser, frame, context) else { return };
                 if frame.is_main() == 0 { return }
                 // What the zapper saved for this site hides again on every load.
-                let saved = r#"(function(){try{const key='herdr.zapper.'+(location.hostname||'');const list=JSON.parse(localStorage.getItem(key)||'[]');if(!Array.isArray(list)||list.length===0)return;const style=document.createElement('style');style.textContent=list.join(',\n')+'{display:none!important;}';const add=()=>{(document.head||document.documentElement).appendChild(style)};if(document.head||document.documentElement){add()}else{addEventListener('DOMContentLoaded',add,{once:true})}}catch{}})();"#;
+                // Runs once the document is there, when its address is known: at context creation it may still be about:blank.
+                let saved = r#"(function(){const run=()=>{try{const host=location.hostname||'';if(!host)return;const list=JSON.parse(localStorage.getItem('herdr.zapper.'+host)||'[]');if(!Array.isArray(list)||list.length===0)return;const style=document.createElement('style');style.id='herdr-zapper-saved';style.textContent=list.join(',\n')+'{display:none!important;}';(document.head||document.documentElement).appendChild(style)}catch{}};if(document.readyState==='loading'){addEventListener('DOMContentLoaded',run,{once:true})}else{run()}})();"#;
                 let mut result = None;
                 let mut exception = None;
                 context.eval(Some(&CefString::from(saved)), None, 0, Some(&mut result), Some(&mut exception));
