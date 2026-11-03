@@ -1957,7 +1957,12 @@ impl AppWindow {
             let record = cx.background_executor().spawn(async move { core.call("terminal.get", json!({ "terminal": asked })) }).await;
             let Ok(record) = record else { return };
             let _ = view.update(cx, |v, cx| {
-                let padding = padding_for_record(&record);
+                // The foreground can lag the agent's own report by a moment; on
+                // entering the full screen the report is the program starting.
+                let padding = padding_for_record(&record).or_else(|| {
+                    record["status"]["app"].as_str().map(|app| crate::programs::agent_name(Some(app)))
+                        .and_then(|key| crate::programs::terminal_padding(&key))
+                });
                 if v.program_padding != padding {
                     v.program_padding = padding;
                     cx.notify();
