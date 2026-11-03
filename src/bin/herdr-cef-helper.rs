@@ -8,7 +8,7 @@ fn main() {
     let loader = cef::library_loader::LibraryLoader::new(&exe, true);
     assert!(loader.load(), "Chromium Embedded Framework not found");
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
-    cef::execute_process(Some(args.as_main_args()), None::<&mut cef::App>, std::ptr::null_mut());
+    gpui_shell::web_view::helper_main();
 }
 
 #[cfg(not(target_os = "macos"))]

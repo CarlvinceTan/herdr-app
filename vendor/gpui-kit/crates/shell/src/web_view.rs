@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, on_fullscreen, pages, preload, set_background, set_fullscreen, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_private, order_back, normal_url, on_click, on_fullscreen, pages, preload, set_background, set_fullscreen, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -61,6 +61,7 @@ mod native {
     pub fn on_click(_: impl Fn(String) + 'static) {}
     pub fn on_fullscreen(_: impl Fn(String, bool) + 'static) {}
     pub fn set_fullscreen(_: &str, _: bool) {}
+    pub fn helper_main() {}
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
     pub fn ids() -> Vec<String> { Vec::new() }
@@ -912,6 +913,14 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 }
             }
         }
+    }
+
+    /// CEF's helper processes (renderers, GPU, utility) take their app here: the renderer needs it
+    /// to give private pages uBlock's scriptlets at document start.
+    pub fn helper_main() {
+        let args = cef::args::Args::new();
+        let mut app = HerdrCefApp::new();
+        cef::execute_process(Some(args.as_main_args()), Some(&mut app), std::ptr::null_mut());
     }
 
     /// Starts CEF, as early in a launch as can be. Its message pump counts the run loop's passes and
