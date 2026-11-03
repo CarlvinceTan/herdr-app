@@ -534,6 +534,30 @@ Show all apps (macOS).
 
 No arguments.
 
+## `web.do`
+
+Drive a web page: navigate, back, forward, reload, zoom, clear-data, hole, show, hide, remove.
+
+| Argument | Required |
+|---|---|
+| `id` | yes |
+| `op` | yes |
+| `arg` | no |
+
+## `web.report`
+
+Publish every web page's address and title to the shared `web.pages`.
+
+No arguments.
+
+## `web.clicked`
+
+A press landed on a web page: focus its pane.
+
+| Argument | Required |
+|---|---|
+| `id` | yes |
+
 ## `window.close`
 
 Close the window (on Linux, quits).
