@@ -11,7 +11,8 @@ Upstream [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app), plus:
 
 - Autofill from a KeePass vault in browser panes: passwords, codes, addresses, cards, the
   save-password offer and passkeys, each after Touch ID (`vendor/gpui-kit/crates/shell/src/autofill/`,
-  `src/bin/herdr-autofill-host.rs`). The vault CLI is `vault/`, built into the app by
+  `src/bin/herdr-autofill-host.rs`). An entry's own `urls` field adds login origins (a
+  Microsoft-hosted NUS sign-in) beside its `URL`. The vault CLI is `vault/`, built into the app by
   `scripts/bundle-cef.sh`; the first thing saved makes a vault if there's none. Its home is the
   author's `cstack/vault`: `scripts/sync-vault.sh` copies it here, and `cargo test --manifest-path
   vault/Cargo.toml` tests it.

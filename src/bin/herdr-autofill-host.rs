@@ -80,7 +80,7 @@ mod host {
         let site = site_of(&host_of(url).ok_or("not a web page")?);
         let accounts = || -> Result<Vec<Account>, String> {
             Ok(vault(&["list"])?["entries"].as_array().into_iter().flatten()
-                .filter(|entry| entry["url"].as_str().and_then(host_of).is_some_and(|host| site_of(&host) == site))
+                .filter(|entry| entry_matches_site(entry, &site))
                 // A passkey on its own has no password to fill; it's offered as a passkey.
                 .filter(|entry| !(entry["hasPasskey"].as_bool() == Some(true) && entry["hasPassword"].as_bool() != Some(true)))
                 .map(|entry| Account {
@@ -341,6 +341,16 @@ mod host {
         labels[labels.len() - keep..].join(".")
     }
 
+    // An entry's login sites: its URL, then the `urls` field (one URL per line or comma), so a
+    // Microsoft-hosted NUS login can match the NUS entry without loosening matching for others.
+    fn entry_matches_site(entry: &Value, site: &str) -> bool {
+        let url = entry["url"].as_str();
+        let more = entry["fields"]["urls"].as_str();
+        url.into_iter().chain(more).flat_map(|urls| urls.split(['\n', '\r', ',', ';', ' ']))
+            .filter_map(|url| host_of(url.trim()))
+            .any(|host| site_of(&host) == site)
+    }
+
     // The vault CLI: HERDR_VAULT names one, else the copy built into Herdr.app beside this helper,
     // else `vault` on the PATH. HERDR_VAULT_HOME runs it with another HOME, which keeps a test
     // vault apart from the real one (whose path is in ~/.config/opencode/vault.json).
@@ -397,6 +407,28 @@ mod host {
         match answered.recv_timeout(CONFIRM_TIME) {
             Ok(true) => Ok(()),
             _ => Err("not confirmed".into()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn entry(url: &str, urls: Option<&str>) -> Value {
+            let mut entry = json!({ "url": url });
+            if let Some(urls) = urls {
+                entry["fields"] = json!({ "urls": urls });
+            }
+            entry
+        }
+
+        #[test]
+        fn an_entry_matches_its_url_and_its_extra_login_urls() {
+            let nus = entry("https://vafs.u.nus.edu/", Some("https://login.microsoftonline.com/\nhttps://nus.edu.sg"));
+            assert!(entry_matches_site(&nus, "microsoftonline.com"));
+            assert!(entry_matches_site(&nus, "nus.edu"));
+            assert!(!entry_matches_site(&nus, "example.com"));
+            assert!(entry_matches_site(&entry("https://example.com", None), "example.com"));
         }
     }
 }
