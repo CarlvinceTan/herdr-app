@@ -1299,11 +1299,21 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, pad: (f32, f32),
         }
     }
     // A program that fills its own background (a TUI) stops at the last whole
-    // row; color the leftover under it so it doesn't read as a gap.
+    // row and column; color the leftover so it doesn't read as a gap.
+    let cols = frame.rows.first().map_or(0, |row| row.len());
+    let spare_x = (f32::from(bounds.size.width) - 2.0 * pad_x - f32::from(cell.width) * cols as f32).max(0.0);
+    if pad_x == 0.0 && spare_x > 0.0 {
+        for (y, row) in frame.rows.iter().enumerate() {
+            let bg = row.last().and_then(|cell| cell.bg).or_else(|| most_common_bg(row)).unwrap_or(frame.bg);
+            let strip = Bounds::new(at(cols, y), size(px(spare_x), cell.height));
+            window.paint_quad(fill(snap_box(strip), hsla(bg)));
+        }
+    }
     if pad_y == 0.0 && spare > 0.0 {
         if let Some(row) = frame.rows.last() {
             let bg = most_common_bg(row).unwrap_or(frame.bg);
-            let strip = Bounds::new(at(0, frame.rows.len()), size(cell.width * row.len() as f32, px(spare)));
+            let width = if pad_x == 0.0 { bounds.size.width } else { cell.width * row.len() as f32 };
+            let strip = Bounds::new(at(0, frame.rows.len()), size(width, px(spare)));
             window.paint_quad(fill(snap_box(strip), hsla(bg)));
         }
     }
