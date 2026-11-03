@@ -275,6 +275,55 @@ impl Model {
         true
     }
 
+    /// Moves a tab to a position (0-based) in a space, or in another space on the
+    /// same machine. A space left with no tabs keeps a chooser tab, or goes.
+    pub fn move_tab(&mut self, ctx: &str, target: &str, at: usize) -> Result<(), String> {
+        let Some(source) = self.space_of(ctx).map(|p| p.id.clone()) else { return Err(format!("no tab {ctx:?}")) };
+        if source == target {
+            let p = self.space_mut(&source).expect("source space");
+            let from = p.tabs.iter().position(|c| c.id == ctx).expect("source tab");
+            let tab = p.tabs.remove(from);
+            let to = at.min(p.tabs.len());
+            p.tabs.insert(to, tab);
+            return Ok(());
+        }
+        let (source_machine, target_machine) = (
+            self.space(&source).and_then(|p| p.machine.clone()),
+            self.space(target).map(|p| p.machine.clone()).ok_or_else(|| format!("no space {target:?}"))?,
+        );
+        if source_machine != target_machine {
+            return Err("a tab stays on its machine".into());
+        }
+        let tab = {
+            let p = self.space_mut(&source).expect("source space");
+            let from = p.tabs.iter().position(|c| c.id == ctx).expect("source tab");
+            let tab = p.tabs.remove(from);
+            if p.active.as_deref() == Some(ctx) {
+                p.active = p.tabs.get(from).or_else(|| p.tabs.last()).map(|c| c.id.clone());
+            }
+            tab
+        };
+        if self.space(&source).is_some_and(|p| p.tabs.is_empty()) {
+            if self.pane_chooser.is_some() {
+                let chooser = self.chooser_pane(source_machine.as_deref()).expect("chooser");
+                let fresh = Tab::with_pane(&self.fresh_id_on("tb", source_machine.as_deref()), "", chooser);
+                let fresh_id = fresh.id.clone();
+                let p = self.space_mut(&source).expect("source space");
+                p.tabs.push(fresh);
+                p.active = Some(fresh_id);
+            } else {
+                self.remove_space(&source);
+            }
+        }
+        let p = self.space_mut(target).ok_or_else(|| format!("no space {target:?}"))?;
+        let to = at.min(p.tabs.len());
+        p.tabs.insert(to, tab);
+        if p.active.is_none() {
+            p.active = Some(ctx.to_owned());
+        }
+        Ok(())
+    }
+
     /// Splits `target` (a pane) with a new terminal pane and focuses it.
     pub fn split(&mut self, target: &str, axis: Axis, new_pane: &str, address: &str) -> bool {
         self.split_with(target, axis, pane(new_pane, address))
@@ -729,6 +778,27 @@ mod tests {
         let mut m = Model::default();
         m.add_space("p1", "api", "/src/api", Tab::new("c1", "fix login", "x1", "t1"));
         m
+    }
+
+    #[test]
+    fn a_tab_moves_to_another_space_in_order() {
+        let mut m = model_with_one();
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "page", "x2", "t2"));
+        m.move_tab("c1", "p2", 1).unwrap();
+        assert!(m.space("p1").is_none(), "an emptied space goes");
+        let ids = |m: &Model| m.space("p2").unwrap().tabs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&m), ["c2", "c1"]);
+        m.move_tab("c1", "p2", 0).unwrap();
+        assert_eq!(ids(&m), ["c1", "c2"]);
+    }
+
+    #[test]
+    fn a_tab_stays_on_its_machine() {
+        let mut m = model_with_one();
+        m.add_space("p2", "remote", "/src", Tab::new("c2", "page", "x2", "t2"));
+        m.space_mut("p2").unwrap().machine = Some("vps".into());
+        assert!(m.move_tab("c1", "p2", 0).is_err());
+        assert!(m.tab("c1").is_some());
     }
 
     #[test]

@@ -548,11 +548,12 @@ The main ones:
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
-  `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
+  `tab.rename {id?, name}` ("": its number again), `tab.move {id, index, space?}`
+  (the index in that space; `space` defaults its own, and a tab stays on its machine),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
-- Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
+- Panes: `pane.split {direction: "left" | "right" | "up" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that

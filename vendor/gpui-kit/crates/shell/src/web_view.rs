@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, pages, set_background, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, pages, preload, set_background, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -71,6 +71,7 @@ mod native {
     pub fn is_private(_: &str) -> bool { false }
     pub fn normal_url(_: &str) -> Option<String> { None }
     pub fn google_account() -> serde_json::Value { serde_json::Value::Null }
+    pub fn preload(_: &Window, _: &str, _: &str) -> bool { false }
     pub fn set_background(_: u32) {}
 }
 
@@ -1071,6 +1072,45 @@ mod native {
         apply_visibility();
     }
 
+    /// Opens a page before its pane is drawn (a browser pane in a hidden tab), so
+    /// coming back to it shows it already loaded. The element adopts it when drawn.
+    pub fn preload(window: &Window, id: &str, url: &str) -> bool {
+        if !STARTED.get() || VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.browser.is_some())) {
+            return false;
+        }
+        let Ok(handle) = HasWindowHandle::window_handle(window) else { return false };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return false };
+        let gpui_view = handle.ns_view.as_ptr() as Id;
+        let parent: Id = unsafe { msg_send![gpui_view, superview] };
+        if parent.is_null() {
+            return false;
+        }
+        let host = unsafe { new_host(parent) };
+        unsafe {
+            let frame = NsRect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 1.0, h: 1.0 } };
+            let _: () = msg_send![host, setFrame: frame];
+            let _: () = msg_send![host, setHidden: YES];
+        }
+        let nested = IN_CEF.replace(true);
+        let browser = create_browser(host, url, 1, 1, false);
+        IN_CEF.set(nested);
+        if !nested && PUMP_AGAIN.take() {
+            schedule(0);
+        }
+        let Some(browser) = browser else {
+            unsafe { let _: () = msg_send![host, removeFromSuperview]; }
+            return false;
+        };
+        VIEWS.with_borrow_mut(|views| {
+            views.insert(id.to_owned(), View {
+                host, browser: Some(browser), url: url.to_owned(), title: String::new(),
+                zoom: DEFAULT_ZOOM, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
+            });
+        });
+        apply_visibility();
+        true
+    }
+
     // AppKit sends keys to the view holding first responder, and a page keeps it after Herdr's own
     // focus has moved on. These move it between the app's view and a page.
     fn page_with_keys() -> Option<String> {
@@ -1608,6 +1648,10 @@ mod native {
         let exists = VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.browser.is_some()));
         if op == "navigate" && !exists {
             WAITING.with_borrow_mut(|waiting| waiting.insert(id.to_owned(), normalize(arg)));
+            return;
+        }
+        // A preloaded page is already where its pane would send it: don't load it again.
+        if op == "navigate" && VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.url == normalize(arg))) {
             return;
         }
         let browser = VIEWS.with_borrow_mut(|views| {

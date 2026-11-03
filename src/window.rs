@@ -573,6 +573,7 @@ impl AppWindow {
         let gone = name.as_deref().map(missing_mods).unwrap_or_default();
         w.load_layout(if gone.is_empty() { name.as_deref().unwrap_or("main") } else { "main" });
         w.apply_look(window, cx);
+        w.preload_pages(window);
         w.show_layout_notes(window, cx);
         if let (Some(n), false) = (&name, gone.is_empty()) {
             let note = json!({ "title": format!("{n} needs mods that aren't here"), "body": format!("Showing Herdr instead. Missing: {}. Your {n} layout file is still there.", gone.join(", ")), "level": "info", "timeout": 12000 });
@@ -837,6 +838,22 @@ impl AppWindow {
     }
 
     /// Runs with the shown layout's look (its root node) at the person's zoom.
+    /// Browser pages saved from the last run, opened before their panes draw:
+    /// a hidden tab's page is loaded when the tab is shown, not when it is reopened.
+    fn preload_pages(&self, window: &Window) {
+        let Some(pages) = crate::mods::shared("web.pages").and_then(|v| v.as_object().cloned()) else { return };
+        let slots: HashSet<String> = crate::mods::shared("browser.slots").and_then(|v| v.as_object().cloned())
+            .unwrap_or_default().values().filter_map(|slot| slot.as_u64()).map(|slot| slot.to_string()).collect();
+        for (id, page) in pages {
+            if (!slots.is_empty() && !slots.contains(&id)) || page["private"].as_bool() == Some(true) {
+                continue;
+            }
+            if let Some(url) = page["url"].as_str().filter(|url| url.starts_with("http")) {
+                gpui_shell::web_view::preload(window, &id, url);
+            }
+        }
+    }
+
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A layout's fonts arrive with its mod: added since the start, they load now.
         if settings::load_home_fonts(cx) {
@@ -3013,12 +3030,10 @@ impl AppWindow {
             }
             "tab.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };
-                let Some(pid) = self.model.space_of(id).map(|p| p.id.clone()) else { return self.fail(format!("no tab {id:?}")) };
-                let p = self.model.space_mut(&pid).unwrap();
-                let from = p.tabs.iter().position(|c| c.id == id).unwrap();
-                let c = p.tabs.remove(from);
-                let to = (i as usize).saturating_sub(1).min(p.tabs.len());
-                p.tabs.insert(to, c);
+                let Some(target) = Self::arg(a, "space").map(str::to_owned).or_else(|| self.model.space_of(id).map(|p| p.id.clone())) else { return self.fail(format!("no tab {id:?}")) };
+                if let Err(error) = self.model.move_tab(id, &target, (i as usize).saturating_sub(1)) {
+                    return self.fail(error);
+                }
             }
             "tab.settle" | "tab.unsettle" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
