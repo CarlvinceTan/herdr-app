@@ -75,8 +75,6 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>)>,
     /// The font size, cell size, font and fonts loaded the drawings were built with.
     painted_with: (u32, Size<Pixels>, String, u64),
-    /// While now is before this, paint only the background (a program's size change).
-    blank_until: Option<Instant>,
 }
 
 pub struct TerminalView {
@@ -212,7 +210,6 @@ impl TerminalView {
                 cursor_at: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0),
-                blank_until: None,
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -411,7 +408,6 @@ impl TerminalView {
         if left_full_screen && self.program_padding.is_some() {
             self.program_padding = None;
             self.left_full_screen_at = Some(Instant::now());
-            self.grid.borrow_mut().blank_until = Some(Instant::now() + Duration::from_millis(120));
         }
         // A program that just took the full screen (OpenCode) may have its own
         // padding; ask what runs now, not at the next listing, so it starts right.
@@ -426,8 +422,6 @@ impl TerminalView {
             && self.program_padding != Some(padding)
         {
             self.program_padding = Some(padding);
-            self.grid.borrow_mut().blank_until = Some(Instant::now() + Duration::from_millis(150));
-            cx.notify();
         }
         if let Some(title) = title {
             let title = if title.is_empty() { self.address.clone() } else { title };
@@ -1250,17 +1244,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, pad: (f32, f32),
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
-    let blank = g.blank_until.filter(|until| Instant::now() < *until);
-    if blank.is_none() {
-        g.blank_until = None;
-    }
     drop(g);
 
     window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
-    if blank.is_some() {
-        window.refresh();
-        return;
-    }
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
