@@ -78,7 +78,10 @@ impl AppWindow {
             tab.shown().visible_blocks().into_iter().find_map(|n| {
                 let b = bounds.get(&n.id)?;
                 let row = rows.get(&n.id).copied().unwrap_or(STRIP);
-                (self.pane_movable(&n.id) && top_strip(*b, row, at)).then(|| n.id.clone())
+                // Only near the grip at the top middle, not anywhere on the header.
+                let centre = f32::from(b.origin.x) + f32::from(b.size.width) / 2.0;
+                let near = (f32::from(at.x) - centre).abs() <= settings::z(36.0).into();
+                (near && self.pane_movable(&n.id) && top_strip(*b, row, at)).then(|| n.id.clone())
             })
         });
         if hovered != self.pane_grip_hover {
