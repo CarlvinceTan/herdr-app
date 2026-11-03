@@ -855,6 +855,10 @@ impl AppWindow {
             self.refresh_mods(cx);
             window.refresh();
         }
+        // A browser page's first paint is this color, not CEF's white.
+        let bg: gpui::Rgba = settings::color("background").into();
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        gpui_shell::web_view::set_background((byte(bg.a) << 24) | (byte(bg.r) << 16) | (byte(bg.g) << 8) | byte(bg.b));
     }
 
     fn reload_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {

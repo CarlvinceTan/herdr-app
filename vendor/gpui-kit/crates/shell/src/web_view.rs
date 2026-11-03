@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, pages, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, pages, set_background, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -71,6 +71,7 @@ mod native {
     pub fn is_private(_: &str) -> bool { false }
     pub fn normal_url(_: &str) -> Option<String> { None }
     pub fn google_account() -> serde_json::Value { serde_json::Value::Null }
+    pub fn set_background(_: u32) {}
 }
 
 #[cfg(target_os = "macos")]
@@ -81,7 +82,7 @@ mod native {
     use std::ffi::{CStr, CString, c_void};
     use std::path::PathBuf;
     use std::sync::Once;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use cef::{
@@ -223,6 +224,13 @@ mod native {
         static PUMP_AGAIN: Cell<bool> = const { Cell::new(false) };
         // Addresses sent before their page's view has drawn.
         static WAITING: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    }
+
+    /// What a page shows before it paints: the app's theme background, so opening one doesn't flash white.
+    static BACKGROUND: AtomicU32 = AtomicU32::new(0xFF1F2328);
+
+    pub fn set_background(color: u32) {
+        BACKGROUND.store(color, Ordering::Relaxed);
     }
 
     // One profile for every copy of the app, so a sign-in holds everywhere. Tests point elsewhere.
@@ -830,9 +838,10 @@ mod native {
             .set_as_child(host as cef::sys::cef_window_handle_t, &bounds);
         let mut client = PageClient::new();
         let mut session = private.then(private_context).flatten();
+        let settings = BrowserSettings { background_color: BACKGROUND.load(Ordering::Relaxed), ..Default::default() };
         let browser = cef::browser_host_create_browser_sync(
             Some(&info), Some(&mut client), Some(&CefString::from(url)),
-            Some(&BrowserSettings::default()), None, session.as_mut(),
+            Some(&settings), None, session.as_mut(),
         )?;
         if let Some(browser_host) = browser.host() {
             let view = browser_host.window_handle() as Id;
