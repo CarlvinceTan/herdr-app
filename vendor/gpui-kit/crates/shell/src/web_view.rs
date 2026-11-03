@@ -90,11 +90,13 @@ mod native {
         App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, ImplMediaAccessCallback, ImplPermissionHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient,
-        LifeSpanHandler, MediaAccessCallback, PermissionHandler, PopupFeatures, Rect as CefRect,
-        RequestContext, RequestContextSettings, RuntimeStyle, Settings, Urlrequest, UrlrequestClient,
-        WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler, WrapPermissionHandler,
-        WrapUrlrequestClient,
-        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler, wrap_permission_handler, wrap_urlrequest_client,
+        ContextMenuHandler, ContextMenuParams, LifeSpanHandler, MediaAccessCallback, MenuModel, PermissionHandler,
+        PopupFeatures, Rect as CefRect, RequestContext, RequestContextSettings, RuntimeStyle, Settings,
+        Urlrequest, UrlrequestClient, WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler,
+        WrapClient, WrapContextMenuHandler, WrapLifeSpanHandler, WrapPermissionHandler, WrapUrlrequestClient,
+        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_context_menu_handler,
+        wrap_life_span_handler, wrap_permission_handler, wrap_urlrequest_client,
+        EventFlags, ImplContextMenuHandler, ImplContextMenuParams, ImplMenuModel,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
     use objc::declare::ClassDecl;
@@ -434,6 +436,10 @@ mod native {
             fn permission_handler(&self) -> Option<PermissionHandler> {
                 Some(PagePermissions::new())
             }
+
+            fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+                Some(PageMenu::new())
+            }
         }
     }
 
@@ -459,9 +465,98 @@ mod native {
         }
     }
 
+    // Chromium's own menu for a page is bare (Back/Forward/Print/Source); add the edit
+    // and image/link actions a browser has. They run in the page, so a selected field
+    // or an image under the pointer is what they act on.
+    const MENU_COPY: i32 = 41001;
+    const MENU_CUT: i32 = 41002;
+    const MENU_PASTE: i32 = 41003;
+    const MENU_SELECT_ALL: i32 = 41004;
+    const MENU_COPY_IMAGE: i32 = 41005;
+    const MENU_COPY_IMAGE_ADDRESS: i32 = 41006;
+    const MENU_OPEN_IMAGE: i32 = 41007;
+    const MENU_SAVE_IMAGE: i32 = 41008;
+    const MENU_COPY_LINK: i32 = 41009;
+    const MENU_OPEN_LINK: i32 = 41010;
+
+    wrap_context_menu_handler! {
+        struct PageMenu;
+
+        impl ContextMenuHandler {
+            fn on_before_context_menu(
+                &self,
+                _browser: Option<&mut Browser>,
+                _frame: Option<&mut Frame>,
+                params: Option<&mut ContextMenuParams>,
+                model: Option<&mut MenuModel>,
+            ) {
+                let Some(model) = model else { return };
+                let p = params.as_deref();
+                let editable = p.is_some_and(|p| p.is_editable() != 0);
+                let selection = p.map(|p| { let text = p.selection_text(); CefString::from(&text).to_string() }).unwrap_or_default();
+                let image = p.is_some_and(|p| p.has_image_contents() != 0);
+                let link = p.map(|p| { let text = p.link_url(); CefString::from(&text).to_string() }).unwrap_or_default();
+                if editable {
+                    model.add_item(MENU_CUT, Some(&CefString::from("Cut")));
+                    model.add_item(MENU_COPY, Some(&CefString::from("Copy")));
+                    model.add_item(MENU_PASTE, Some(&CefString::from("Paste")));
+                    model.add_item(MENU_SELECT_ALL, Some(&CefString::from("Select All")));
+                } else if !selection.is_empty() {
+                    model.add_item(MENU_COPY, Some(&CefString::from("Copy")));
+                    model.add_item(MENU_SELECT_ALL, Some(&CefString::from("Select All")));
+                }
+                if image {
+                    model.add_separator();
+                    model.add_item(MENU_COPY_IMAGE, Some(&CefString::from("Copy image")));
+                    model.add_item(MENU_COPY_IMAGE_ADDRESS, Some(&CefString::from("Copy image address")));
+                    model.add_item(MENU_OPEN_IMAGE, Some(&CefString::from("Open image in new tab")));
+                    model.add_item(MENU_SAVE_IMAGE, Some(&CefString::from("Save image as...")));
+                }
+                if !link.is_empty() {
+                    model.add_separator();
+                    model.add_item(MENU_COPY_LINK, Some(&CefString::from("Copy link address")));
+                    model.add_item(MENU_OPEN_LINK, Some(&CefString::from("Open link in new tab")));
+                }
+            }
+
+            fn on_context_menu_command(
+                &self,
+                _browser: Option<&mut Browser>,
+                frame: Option<&mut Frame>,
+                params: Option<&mut ContextMenuParams>,
+                command_id: ::std::os::raw::c_int,
+                _event_flags: EventFlags,
+            ) -> ::std::os::raw::c_int {
+                let Some(frame) = frame else { return 0 };
+                let p = params.as_deref();
+                let (x, y) = p.map(|p| (p.xcoord(), p.ycoord())).unwrap_or((0, 0));
+                let link = p.map(|p| { let text = p.link_url(); CefString::from(&text).to_string() }).unwrap_or_default();
+                let link = serde_json::to_string(&link).unwrap_or_else(|_| "\"\"".into());
+                let image = |action: &str| format!(
+                    "(()=>{{const e=document.elementFromPoint({x},{y});const i=e&&e.closest('img');const u=i&&(i.currentSrc||i.src);if(!u)return;{action}}})()"
+                );
+                let code = match command_id {
+                    MENU_COPY => "document.execCommand('copy')".to_string(),
+                    MENU_CUT => "document.execCommand('cut')".to_string(),
+                    MENU_SELECT_ALL => "document.execCommand('selectAll')".to_string(),
+                    // Scripted paste is refused; reading the clipboard is allowed from the menu's gesture.
+                    MENU_PASTE => "navigator.clipboard.readText().then(t=>document.execCommand('insertText',false,t)).catch(()=>{})".to_string(),
+                    MENU_COPY_IMAGE => image("fetch(u).then(r=>r.blob()).then(b=>navigator.clipboard.write([new ClipboardItem({[b.type]:b})])).catch(()=>navigator.clipboard.writeText(u))"),
+                    MENU_COPY_IMAGE_ADDRESS => image("navigator.clipboard.writeText(u)"),
+                    MENU_OPEN_IMAGE => image("window.open(u,'_blank')"),
+                    MENU_SAVE_IMAGE => image("const a=document.createElement('a');a.href=u;a.download='';a.click()"),
+                    MENU_COPY_LINK => format!("navigator.clipboard.writeText({link})"),
+                    MENU_OPEN_LINK => format!("window.open({link},'_blank')"),
+                    _ => return 0,
+                };
+                frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
+                1
+            }
+        }
+    }
+
     wrap_life_span_handler! {
         struct PagePopups;
-
         impl LifeSpanHandler {
             // A script's popup (a sign-in, usually), or one opened blank to be filled in later, gets a
             // window of its own and keeps its tie to the page that opened it, which waits to hear back
