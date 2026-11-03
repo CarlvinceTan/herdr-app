@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, is_private, on_click, pages, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, is_private, normal_url, on_click, pages, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -67,6 +67,7 @@ mod native {
     pub fn cover(_: Bounds<Pixels>, _: bool) {}
     pub fn holes(_: &str) -> usize { 0 }
     pub fn is_private(_: &str) -> bool { false }
+    pub fn normal_url(_: &str) -> Option<String> { None }
     pub fn google_account() -> serde_json::Value { serde_json::Value::Null }
 }
 
@@ -168,6 +169,8 @@ mod native {
         asked: u64,
         // A mod's popup over the page (its address, its menu): x, y, width, height in the window.
         hole: Option<[f64; 4]>,
+        // While the pane is private: its normal page, parked and hidden, to come back as it was.
+        normal: Option<Browser>,
     }
 
     /// Herdr's own popups and toasts over pages, in window coordinates: the page shows a hole
@@ -812,8 +815,10 @@ mod native {
         unsafe {
             let _: () = msg_send![view.host, removeFromSuperview];
         }
-        if let Some(host) = view.browser.as_ref().and_then(|browser| browser.host()) {
-            host.close_browser(1);
+        for browser in view.browser.iter().chain(view.normal.iter()) {
+            if let Some(host) = browser.host() {
+                host.close_browser(1);
+            }
         }
         unsafe {
             // Reading the list holds its views until this pool ends, and at quit nothing else would.
@@ -969,6 +974,7 @@ mod native {
                 left: 0.0,
                 asked: 0,
                 hole: None,
+                normal: None,
             });
             view.top = top;
             view.left = left;
@@ -1299,6 +1305,97 @@ mod native {
         })
     }
 
+    fn set_view_hidden(browser: &Browser, hidden: bool) {
+        if let Some(host) = browser.host() {
+            let view = host.window_handle() as Id;
+            if !view.is_null() {
+                unsafe {
+                    let _: () = msg_send![view, setHidden: if hidden { YES } else { NO }];
+                }
+            }
+        }
+    }
+
+    /// Switching a pane's page to the private session parks its normal page, hidden, and opens the
+    /// same address privately on top; switching back closes the private page (and the session, if
+    /// it was the last) and shows the normal page again as it was.
+    fn switch_private(id: &str, on: bool) {
+        if PRIVATE_IDS.with_borrow(|ids| ids.contains(id)) == on {
+            return;
+        }
+        let Some((host, url, width, height)) = VIEWS.with_borrow(|views| views.get(id).map(|view| {
+            let bounds: NsRect = unsafe { msg_send![view.host, bounds] };
+            (view.host, view.url.clone(), bounds.size.w as i32, bounds.size.h as i32)
+        })) else { return };
+        let create = |url: &str, private: bool| {
+            // Creating a browser runs the message loop, which reaches back into VIEWS.
+            let nested = IN_CEF.replace(true);
+            let browser = create_browser(host, if url.is_empty() { "about:blank" } else { url }, width, height, private);
+            IN_CEF.set(nested);
+            if !nested && PUMP_AGAIN.take() {
+                schedule(0);
+            }
+            browser
+        };
+        if on {
+            let parked = VIEWS.with_borrow_mut(|views| views.get_mut(id).and_then(|view| view.browser.take()));
+            if let Some(normal) = &parked {
+                set_view_hidden(normal, true);
+            }
+            PRIVATE_IDS.with_borrow_mut(|ids| ids.insert(id.to_owned()));
+            let private = create(&url, true);
+            VIEWS.with_borrow_mut(|views| {
+                if let Some(view) = views.get_mut(id) {
+                    view.normal = parked;
+                    view.browser = private;
+                    apply_zoom(view);
+                }
+            });
+        } else {
+            let (private, normal) = VIEWS.with_borrow_mut(|views| {
+                views.get_mut(id).map(|view| (view.browser.take(), view.normal.take())).unwrap_or_default()
+            });
+            // Closed and taken out of the pane, as a closing pane's page is: only then does it go.
+            if let Some(host) = private.as_ref().and_then(|private| private.host()) {
+                let view = host.window_handle() as Id;
+                host.close_browser(1);
+                if !view.is_null() {
+                    unsafe {
+                        let _: () = msg_send![view, removeFromSuperview];
+                    }
+                }
+            }
+            PRIVATE_IDS.with_borrow_mut(|ids| ids.remove(id));
+            if !VIEWS.with_borrow(|views| views.keys().any(|key| PRIVATE_IDS.with_borrow(|ids| ids.contains(key)))) {
+                PRIVATE_CONTEXT.take();
+            }
+            let normal = match normal {
+                Some(normal) => {
+                    set_view_hidden(&normal, false);
+                    Some(normal)
+                }
+                None => create("about:blank", false),
+            };
+            VIEWS.with_borrow_mut(|views| {
+                if let Some(view) = views.get_mut(id) {
+                    view.browser = normal;
+                    view.url.clear();
+                    refresh(view);
+                }
+            });
+        }
+        apply_visibility();
+    }
+
+    /// While a pane is private, the address its parked normal page is at.
+    pub fn normal_url(id: &str) -> Option<String> {
+        VIEWS.with(|views| views.try_borrow().ok().and_then(|views| {
+            let normal = views.get(id)?.normal.as_ref()?;
+            let entry = normal.host()?.visible_navigation_entry()?;
+            Some(CefString::from(&entry.url()).to_string())
+        }))
+    }
+
     pub fn is_private(id: &str) -> bool {
         PRIVATE_IDS.with_borrow(|ids| ids.contains(id))
     }
@@ -1427,9 +1524,14 @@ mod native {
             }
             return;
         }
-        // Before the page exists: it opens in the private session.
+        // "on" or "off": the pane's page switches to the private session or back, in place. Before the
+        // page exists it only says which it opens in.
         if op == "private" {
-            PRIVATE_IDS.with_borrow_mut(|ids| ids.insert(id.to_owned()));
+            let on = arg.trim() != "off";
+            if VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.browser.is_some())) {
+                return switch_private(id, on);
+            }
+            PRIVATE_IDS.with_borrow_mut(|ids| if on { ids.insert(id.to_owned()) } else { ids.remove(id) });
             return;
         }
         if op == "google" {

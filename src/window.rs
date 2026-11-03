@@ -2681,7 +2681,9 @@ impl AppWindow {
                     .map(|(id, url, title, asked, shown)| {
                         let holes = gpui_shell::web_view::holes(&id);
                         let private = gpui_shell::web_view::is_private(&id);
-                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private }))
+                        // A private pane's normal page: where it comes back to (after a restart too).
+                        let normal = gpui_shell::web_view::normal_url(&id);
+                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal }))
                     })
                     .collect::<serde_json::Map<String, Value>>();
                 let pages = Value::Object(pages);
