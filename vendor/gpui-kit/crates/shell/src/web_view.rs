@@ -228,6 +228,8 @@ mod native {
         static UBLOCK_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
         // Renderer side: browsers created private, whose frames get uBlock's scriptlets.
         static PRIVATE_BROWSERS: RefCell<HashSet<i32>> = RefCell::new(HashSet::new());
+        // The cosmetic CSS for each host seen in a private frame.
+        static COSMETIC_CSS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
         // A hidden page of uBlock's, opened at launch because its worker starts only when asked.
         static UBLOCK_PROBE: RefCell<Option<Browser>> = const { RefCell::new(None) };
         static UBLOCK_PROBE_HOST: Cell<Id> = const { Cell::new(NIL) };
@@ -263,6 +265,7 @@ mod native {
     // extension. Read from its rulesets once and kept beside them.
     static UBLOCK_HOSTS: OnceLock<HashSet<String>> = OnceLock::new();
     static UBLOCK_SCRIPTLETS: OnceLock<String> = OnceLock::new();
+    static UBLOCK_COSMETIC: OnceLock<Vec<CosmeticRuleset>> = OnceLock::new();
 
     // uBO Lite is an unpacked extension, so it has no store updater: fetch the release and
     // stage it here; the next launch swaps it in before Chromium loads extensions.
@@ -2063,6 +2066,103 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         block
     }
 
+    #[derive(serde::Deserialize)]
+    struct CosmeticRuleset {
+        #[serde(default)] selectors: Vec<String>,
+        #[serde(rename = "selectorLists", default)] selector_lists: Vec<String>,
+        #[serde(rename = "selectorListRefs", default)] selector_list_refs: Vec<usize>,
+        #[serde(default)] hostnames: Vec<String>,
+        #[serde(rename = "hasEntities", default)] has_entities: bool,
+    }
+
+    fn load_cosmetic() -> Vec<CosmeticRuleset> {
+        const RULESETS: [&str; 6] = ["ublock-filters", "easylist", "easyprivacy", "pgl", "ublock-badware", "urlhaus-full"];
+        let dir = state_dir().join("ublock/rulesets/scripting/specific");
+        let mut out = Vec::new();
+        for name in RULESETS {
+            let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.json"))) else { continue };
+            if let Ok(ruleset) = serde_json::from_str::<CosmeticRuleset>(&text) { out.push(ruleset) }
+        }
+        out
+    }
+
+    /// uBlock's cosmetic filters for this host: the selectors it hides, and the style actions it
+    /// applies. Procedural filters (which need its engine) are left out.
+    fn cosmetic_css(host: &str) -> String {
+        if host.is_empty() { return String::new() }
+        if let Some(css) = COSMETIC_CSS.with_borrow(|cache| cache.get(host).cloned()) { return css }
+        let data = UBLOCK_COSMETIC.get_or_init(load_cosmetic);
+        let mut needles: Vec<String> = vec![host.to_owned()];
+        let mut rest = host;
+        while let Some((_, tail)) = rest.split_once('.') {
+            needles.push(tail.to_owned());
+            rest = tail;
+        }
+        needles.push("*".to_owned());
+        let mut entities: Vec<String> = Vec::new();
+        for needle in &needles {
+            let mut part = needle.as_str();
+            while let Some((head, _)) = part.rsplit_once('.') {
+                entities.push(format!("{head}.*"));
+                part = head;
+            }
+        }
+        let mut hide: HashSet<String> = HashSet::new();
+        let mut styled: Vec<String> = Vec::new();
+        let mut except: HashSet<String> = HashSet::new();
+        for ruleset in data {
+            let mut lists: Vec<usize> = Vec::new();
+            let entities = if ruleset.has_entities { entities.as_slice() } else { &[] };
+            for needle in needles.iter().chain(entities.iter()) {
+                if let Ok(index) = ruleset.hostnames.binary_search(needle) {
+                    if let Some(list) = ruleset.selector_list_refs.get(index) {
+                        lists.push(*list);
+                    }
+                }
+            }
+            for list in lists {
+                let Some(text) = ruleset.selector_lists.get(list) else { continue };
+                for part in text.split(',') {
+                    let Ok(index) = part.trim().parse::<i64>() else { continue };
+                    if index >= 0 {
+                        let Some(selector) = ruleset.selectors.get(index as usize) else { continue };
+                        if selector.starts_with('{') {
+                            if let Some(rule) = style_rule(selector) { styled.push(rule) }
+                        } else {
+                            hide.insert(selector.clone());
+                        }
+                    } else if let Some(selector) = ruleset.selectors.get((!index) as usize) {
+                        except.insert(selector.clone());
+                    }
+                }
+            }
+        }
+        for selector in &except { hide.remove(selector); }
+        let mut css = String::new();
+        if hide.is_empty() == false {
+            css.push_str(&hide.into_iter().collect::<Vec<_>>().join(",\n"));
+            css.push_str("{display:none!important;}");
+        }
+        for rule in styled {
+            if css.is_empty() == false { css.push('\n') }
+            css.push_str(&rule);
+        }
+        COSMETIC_CSS.with_borrow_mut(|cache| { cache.insert(host.to_owned(), css.clone()) });
+        css
+    }
+
+    /// A selector entry that is a style action (`{"selector":..,"action":["style",..]}`).
+    fn style_rule(selector: &str) -> Option<String> {
+        let entry: serde_json::Value = serde_json::from_str(selector).ok()?;
+        if entry["cssable"].as_bool() != Some(true) { return None }
+        let selector = entry["selector"].as_str()?;
+        let action = entry["action"].as_array()?;
+        if action.first()?.as_str()? != "style" { return None }
+        let style = action.get(1)?.as_str()?;
+        if style.is_empty() { return None }
+        Some(format!("{selector}{{{style}}}"))
+    }
+
     /// uBlock's scriptlets for its default ruleset, for private frames: the extension's own
     /// content scripts are not there to inject them.
     fn ublock_scriptlets() -> &'static str {
@@ -2113,6 +2213,17 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 let mut result = None;
                 let mut exception = None;
                 context.eval(Some(&CefString::from(code)), None, 0, Some(&mut result), Some(&mut exception));
+                let url = CefString::from(&frame.url()).to_string();
+                if url.starts_with("http") {
+                    let css = cosmetic_css(&host_of_url(&url));
+                    if css.is_empty() == false {
+                        let css = serde_json::to_string(&css).unwrap_or_default();
+                        let script = format!(r#"(function(css){{const add=()=>{{if(document.documentElement===null){{setTimeout(add,0);return;}}try{{const sheet=new CSSStyleSheet();sheet.replaceSync(css);document.adoptedStyleSheets=[...document.adoptedStyleSheets,sheet];}}catch{{const style=document.createElement('style');style.textContent=css;(document.head||document.documentElement).appendChild(style);}}}};if(document.documentElement!==null){{add();}}else{{addEventListener('DOMContentLoaded',add,{{once:true}});}}}})({css});"#);
+                        let mut result = None;
+                        let mut exception = None;
+                        context.eval(Some(&CefString::from(script.as_str())), None, 0, Some(&mut result), Some(&mut exception));
+                    }
+                }
             }
         }
     }
