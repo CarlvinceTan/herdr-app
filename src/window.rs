@@ -462,6 +462,7 @@ impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         mods::note_fonts(cx);
+        crate::mods::set_shared("pane.hover".into(), Value::Null);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut w = AppWindow {
             core,
@@ -858,6 +859,7 @@ impl AppWindow {
         // A layout's fonts arrive with its mod: added since the start, they load now.
         if settings::load_home_fonts(cx) {
             mods::note_fonts(cx);
+        crate::mods::set_shared("pane.hover".into(), Value::Null);
         }
         let s = settings::Settings::compose(&self.person, &self.chrome.look, self.system_dark);
         let problems = s.problems();
@@ -4068,15 +4070,29 @@ impl AppWindow {
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
-        let Some(h) = &f.header else { return el.child(body).into_any_element() };
+        let Some(h) = &f.header else { return self.pane_hover_wrap(&n.id, el.child(body).into_any_element(), cx) };
         let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
             let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
-            return el.child(body).child(head).into_any_element();
+            return self.pane_hover_wrap(&n.id, el.child(body).child(head).into_any_element(), cx);
         }
-        if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element()
+        self.pane_hover_wrap(&n.id, if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element(), cx)
+    }
+
+    /// The whole pane says when it is hovered, so a header's controls can show for it.
+    fn pane_hover_wrap(&self, id: &str, child: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let hovered_id = id.to_owned();
+        div().id(SharedString::from(format!("pane-hover-{id}"))).size_full()
+            .on_hover(cx.listener(move |_, over: &bool, _, cx| {
+                let want = if *over { json!(hovered_id) } else { Value::Null };
+                if crate::mods::shared("pane.hover").as_ref() != Some(&want) {
+                    crate::mods::set_shared("pane.hover".into(), want);
+                    cx.notify();
+                }
+            }))
+            .child(child).into_any_element()
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
