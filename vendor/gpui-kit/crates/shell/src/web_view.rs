@@ -1271,11 +1271,36 @@ mod native {
     fn watch_presses() {
         static WATCHING: Once = Once::new();
         WATCHING.call_once(|| {
-            const PRESSES: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+            const PRESSES: u64 = (1 << 1) | (1 << 3) | (1 << 25) | (1 << 10);
             let handler = block::ConcreteBlock::new(|event: Id| -> Id {
                 // Never mid-change of the pages (a panic here would end the app).
                 if event.is_null() || VIEWS.with(|views| views.try_borrow().is_err()) {
                     return event;
+                }
+                // Browser keys reach the page, not the app: act on the page's own shortcuts.
+                const KEY_DOWN: u64 = 10;
+                let kind: u64 = unsafe { msg_send![event, type] };
+                if kind == KEY_DOWN {
+                    let Some(id) = page_with_keys() else { return event };
+                    let flags: u64 = unsafe { msg_send![event, modifierFlags] };
+                    if flags & (1 << 20) == 0 {
+                        return event;
+                    }
+                    let code: u16 = unsafe { msg_send![event, keyCode] };
+                    let shift = flags & (1 << 17) != 0;
+                    let browser = || VIEWS.with_borrow(|views| views.get(&id).and_then(|view| view.browser.clone()));
+                    let handled = match (code, shift) {
+                        (45, true) => { command(&id, "private", if is_private(&id) { "off" } else { "on" }); true } // Cmd+Shift+N
+                        (35, false) => { if let Some(browser) = browser() { if let Some(host) = browser.host() { host.print(); } } true } // Cmd+P
+                        (15, _) => { if let Some(browser) = browser() { browser.reload(); } true } // Cmd+R
+                        (33, _) => { if let Some(browser) = browser() { browser.go_back(); } true } // Cmd+[
+                        (30, _) => { if let Some(browser) = browser() { browser.go_forward(); } true } // Cmd+]
+                        (24, _) => { command(&id, "zoom", "in"); true } // Cmd+=
+                        (27, _) => { command(&id, "zoom", "out"); true } // Cmd+-
+                        (29, _) => { command(&id, "zoom", "reset"); true } // Cmd+0
+                        _ => false,
+                    };
+                    return if handled { NIL } else { event };
                 }
                 unsafe {
                     let gpui = GPUI_VIEW.get();
