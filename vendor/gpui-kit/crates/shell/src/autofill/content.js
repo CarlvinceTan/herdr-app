@@ -141,7 +141,11 @@
     const totp = accounts.filter((account) => account.totp);
     if (fromMessages?.code && fromMessages.forSite && firstOffer(scope, "code")) return fillCode(field, fromMessages.code);
     if (!fromMessages?.code && totp.length === 1 && firstOffer(scope, "code")) return codeFrom(field, totp[0]);
-    const rows = totp.map((account) => ({ label: account.username || account.title, pick: () => codeFrom(field, account) }));
+    const rows = totp.map((account) => ({
+      // This menu only fills the code field: say so, instead of looking like another account.
+      label: totp.length === 1 ? "Use verification code" : `Use code from ${account.title}`,
+      pick: () => codeFrom(field, account),
+    }));
     if (fromMessages?.code) rows.unshift({ label: `${fromMessages.code} · From Messages`, pick: () => { hide(); fillCode(field, fromMessages.code); } });
     if (rows.length) show(field, rows);
   }

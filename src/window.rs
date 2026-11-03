@@ -1931,7 +1931,12 @@ impl AppWindow {
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
-        let padding = self.live.get(addr).and_then(|r| r.pointer("/program/key")).and_then(Value::as_str).and_then(crate::programs::terminal_padding);
+        // A program's padding follows what runs in the foreground now. The agent's
+        // own report outlives the agent (a shell shows `opencode`'s app after it
+        // exits), which would leave that shell without the layout's padding.
+        let running: Vec<String> = self.live.get(addr).and_then(Value::as_object).and_then(running_argv)
+            .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        let padding = crate::programs::of(None, &running)["key"].as_str().and_then(crate::programs::terminal_padding);
         view.update(cx, |v, cx| {
             v.cwd = cwd;
             v.right_click_to_program = to_program;
