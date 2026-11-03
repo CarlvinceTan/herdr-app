@@ -2818,6 +2818,13 @@ impl AppWindow {
     // The browser pane's commands, which touch nothing else.
     fn run_web(&mut self, name: &str, args: &Value, window: &mut Window, cx: &mut Context<Self>) {
         match name {
+            "web.pages" => {
+                let pages: Vec<Value> = gpui_shell::web_view::pages().into_iter().map(|(id, url, title, _, shown)| {
+                    let private = gpui_shell::web_view::is_private(&id);
+                    json!({ "id": id, "url": url, "title": title, "private": private, "shown": shown })
+                }).collect();
+                self.answer(Ok(json!({ "pages": pages })));
+            }
             "web.do" => {
                 let text = |key| Self::arg(args, key).unwrap_or("");
                 gpui_shell::web_view::command(text("id"), text("op"), text("arg"));
@@ -3073,14 +3080,6 @@ impl AppWindow {
                 let Some(name) = Self::arg(a, "name") else { return self.fail("tab.rename needs name (empty: its number)") };
                 let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
                 c.name = name.trim().to_owned();
-            }
-            "web.pages" => {
-                let pages: Vec<Value> = gpui_shell::web_view::pages().into_iter().map(|(id, url, title, _, shown)| {
-                    let private = gpui_shell::web_view::is_private(&id);
-                    json!({ "id": id, "url": url, "title": title, "private": private, "shown": shown })
-                }).collect();
-                self.answer(Ok(json!({ "pages": pages })));
-                return;
             }
             "page.fullscreen" => {
                 let id = Self::arg(a, "id").unwrap_or_default().to_owned();
