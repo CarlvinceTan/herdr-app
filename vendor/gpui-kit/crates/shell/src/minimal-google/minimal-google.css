@@ -1,7 +1,18 @@
-/* A browser pane's home: the search box, without Google's site chrome. */
-.acUsEb.Qi40Vc.CoM3Df, /* About, Store, Gmail, Images, the apps and the account */
-.acUsEb.gwogMd,        /* the promo line and "Google offered in" */
-.Ij8KCd                /* the country and the footer links */
-{
-  display: none !important;
+/* Keep Google's top bar and the country line; drop the promo under the search box
+   and the footer links, while leaving their space so the search stays centred. */
+.acUsEb.Qi40Vc.CoM3Df {
+  display: flex !important;
+}
+
+.acUsEb.gwogMd {
+  display: block !important;
+  visibility: hidden !important;
+}
+
+.Ij8KCd {
+  display: block !important;
+}
+
+.Ij8KCd .g55egf.xQQEXb {
+  visibility: hidden !important;
 }
