@@ -1560,6 +1560,25 @@ impl AppWindow {
         changed
     }
 
+    /// A tab with one pane keeps it focused: a click on the bar or the sidebar
+    /// takes the keyboard from a page, but the pane is the only place keys can go.
+    fn refocus_lone_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) || self.overlays.iter().any(|overlay| overlay.kind.modal_keys()) {
+            return;
+        }
+        let Some(pane) = self.model.active_tab().and_then(|tab| {
+            let panes = tab.root.panes();
+            (panes.len() == 1).then(|| panes[0].id.clone())
+        }) else { return };
+        let slot = crate::mods::shared("browser.slots").and_then(|v| v.as_object().cloned()).unwrap_or_default()
+            .get(&pane).and_then(|slot| slot.as_u64());
+        if let Some(slot) = slot {
+            gpui_shell::web_view::command(&slot.to_string(), "focus", "");
+        } else if let Some(focus) = self.pane_focus(&pane) {
+            focus.focus(window, cx);
+        }
+    }
+
     /// The keyboard never ends up nowhere. When what had it leaves the screen (a
     /// mod hidden but kept alive, a closed pane, a hidden mod focusing itself on a
     /// reload), it goes to the top dialog, else the shown agent or focused pane,
@@ -4999,6 +5018,7 @@ impl Render for AppWindow {
                     this.publish(cx);
                     this.flush_documents(false, window, cx);
                 }
+                this.refocus_lone_pane(window, cx);
             }))
             .child(tree)
             .children(overlays)
