@@ -266,6 +266,7 @@ mod native {
     static UBLOCK_HOSTS: OnceLock<HashSet<String>> = OnceLock::new();
     static UBLOCK_SCRIPTLETS: OnceLock<String> = OnceLock::new();
     static UBLOCK_COSMETIC: OnceLock<Vec<CosmeticRuleset>> = OnceLock::new();
+    static UBLOCK_GENERIC: OnceLock<Vec<GenericRuleset>> = OnceLock::new();
 
     // uBO Lite is an unpacked extension, so it has no store updater: fetch the release and
     // stage it here; the next launch swaps it in before Chromium loads extensions.
@@ -2066,6 +2067,11 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         block
     }
 
+    /// uBlock's hostname order: shorter first, then lexicographic.
+    fn hostname_order(a: &str, b: &str) -> std::cmp::Ordering {
+        a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+    }
+
     #[derive(serde::Deserialize)]
     struct CosmeticRuleset {
         #[serde(default)] selectors: Vec<String>,
@@ -2073,6 +2079,86 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         #[serde(rename = "selectorListRefs", default)] selector_list_refs: Vec<usize>,
         #[serde(default)] hostnames: Vec<String>,
         #[serde(rename = "hasEntities", default)] has_entities: bool,
+    }
+
+    struct GenericRuleset {
+        highly: String,
+        lowly: Vec<String>,
+        exceptions: Vec<String>,
+        hostnames: Vec<String>,
+        has_entities: bool,
+    }
+
+    // The generated generic files are plain literals: pull the arrays and strings out of them.
+    fn json_slice_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+        let start = text.find(marker)? + marker.len();
+        let rest = &text[start..];
+        let open = rest.find('[')?;
+        let bytes = rest.as_bytes();
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().enumerate().skip(open) {
+            if in_string {
+                if escaped { escaped = false }
+                else if *byte == b'\\' { escaped = true }
+                else if *byte == b'"' { in_string = false }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 { return Some(&rest[open..=index]) }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn json_string_after(text: &str, marker: &str) -> Option<String> {
+        let start = text.find(marker)? + marker.len();
+        let rest = &text[start..];
+        let open = rest.find('"')?;
+        let bytes = rest.as_bytes();
+        let mut escaped = false;
+        for index in open + 1..bytes.len() {
+            let byte = bytes[index];
+            if escaped { escaped = false; continue }
+            if byte == b'\\' { escaped = true; continue }
+            if byte == b'"' {
+                return serde_json::from_str(&rest[open..=index]).ok();
+            }
+        }
+        None
+    }
+
+    fn load_generic() -> Vec<GenericRuleset> {
+        const RULESETS: [&str; 6] = ["ublock-filters", "easylist", "easyprivacy", "pgl", "ublock-badware", "urlhaus-full"];
+        let dir = state_dir().join("ublock/rulesets/scripting/generic");
+        let mut out = Vec::new();
+        for name in RULESETS {
+            let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.js"))) else { continue };
+            let highly = json_string_after(&text, "const highlyGeneric =").unwrap_or_default();
+            let exceptions: Vec<String> = json_slice_after(&text, "const exceptions =")
+                .and_then(|slice| serde_json::from_str(slice).ok()).unwrap_or_default();
+            let hostnames: Vec<String> = json_slice_after(&text, "const hostnames =")
+                .and_then(|slice| serde_json::from_str(slice).ok()).unwrap_or_default();
+            let lowly: Vec<String> = json_slice_after(&text, "const lowlyGeneric = new Map")
+                .and_then(|slice| serde_json::from_str::<Vec<(i64, String)>>(slice).ok())
+                .map(|pairs| pairs.into_iter().map(|(_, selector)| selector).collect())
+                .unwrap_or_default();
+            out.push(GenericRuleset {
+                highly,
+                lowly,
+                exceptions,
+                hostnames,
+                has_entities: text.contains("const hasEntities = true"),
+            });
+        }
+        out
     }
 
     fn load_cosmetic() -> Vec<CosmeticRuleset> {
@@ -2114,7 +2200,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             let mut lists: Vec<usize> = Vec::new();
             let entities = if ruleset.has_entities { entities.as_slice() } else { &[] };
             for needle in needles.iter().chain(entities.iter()) {
-                if let Ok(index) = ruleset.hostnames.binary_search(needle) {
+                if let Ok(index) = ruleset.hostnames.binary_search_by(|probe| hostname_order(probe, needle)) {
                     if let Some(list) = ruleset.selector_list_refs.get(index) {
                         lists.push(*list);
                     }
@@ -2138,9 +2224,35 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             }
         }
         for selector in &except { hide.remove(selector); }
+        // Generic filters apply everywhere; their exceptions are the hostnames' lists.
+        let mut generic: HashSet<String> = HashSet::new();
+        let mut highly: Vec<String> = Vec::new();
+        let mut generic_except: HashSet<String> = HashSet::new();
+        for ruleset in UBLOCK_GENERIC.get_or_init(load_generic) {
+            if ruleset.highly.is_empty() == false {
+                highly.push(ruleset.highly.clone());
+            }
+            for selector in &ruleset.lowly {
+                generic.insert(selector.clone());
+            }
+            let entities = if ruleset.has_entities { entities.as_slice() } else { &[] };
+            for needle in needles.iter().chain(entities.iter()) {
+                if let Ok(index) = ruleset.hostnames.binary_search_by(|probe| hostname_order(probe, needle)) {
+                    if let Some(exceptions) = ruleset.exceptions.get(index) {
+                        for selector in exceptions.split('\n') {
+                            generic_except.insert(selector.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        for selector in &generic_except { generic.remove(selector); }
+        let mut selectors: Vec<String> = hide.into_iter().collect();
+        selectors.extend(generic);
+        selectors.extend(highly);
         let mut css = String::new();
-        if hide.is_empty() == false {
-            css.push_str(&hide.into_iter().collect::<Vec<_>>().join(",\n"));
+        if selectors.is_empty() == false {
+            css.push_str(&selectors.join(",\n"));
             css.push_str("{display:none!important;}");
         }
         for rule in styled {
