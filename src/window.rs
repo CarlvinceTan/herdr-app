@@ -2680,12 +2680,18 @@ impl AppWindow {
                 let pages = gpui_shell::web_view::pages().into_iter()
                     .map(|(id, url, title, asked, shown)| {
                         let holes = gpui_shell::web_view::holes(&id);
-                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes }))
+                        let private = gpui_shell::web_view::is_private(&id);
+                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private }))
                     })
                     .collect::<serde_json::Map<String, Value>>();
                 let pages = Value::Object(pages);
                 if crate::mods::shared("web.pages").as_ref() != Some(&pages) {
                     crate::mods::set_shared("web.pages".into(), pages);
+                }
+                // Who the browser is signed in to Google as, once a `google` ask has answered.
+                let google = gpui_shell::web_view::google_account();
+                if !google.is_null() && crate::mods::shared("web.google").as_ref() != Some(&google) {
+                    crate::mods::set_shared("web.google".into(), google);
                 }
             }
             // A press on a page: its pane takes the focus. A page's id is its slot.

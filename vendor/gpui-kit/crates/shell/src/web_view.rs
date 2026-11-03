@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, holes, on_click, pages, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, is_private, on_click, pages, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -66,6 +66,8 @@ mod native {
     pub fn begin_covers(_: bool) {}
     pub fn cover(_: Bounds<Pixels>, _: bool) {}
     pub fn holes(_: &str) -> usize { 0 }
+    pub fn is_private(_: &str) -> bool { false }
+    pub fn google_account() -> serde_json::Value { serde_json::Value::Null }
 }
 
 #[cfg(target_os = "macos")]
@@ -82,9 +84,10 @@ mod native {
     use cef::{
         App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
-        ImplLifeSpanHandler, LifeSpanHandler, PopupFeatures, Rect as CefRect, RuntimeStyle, Settings,
-        WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler,
-        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler,
+        ImplLifeSpanHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient, LifeSpanHandler, PopupFeatures, Rect as CefRect,
+        RequestContext, RequestContextSettings, RuntimeStyle, Settings, Urlrequest, UrlrequestClient,
+        WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler, WrapClient, WrapLifeSpanHandler, WrapUrlrequestClient,
+        rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_life_span_handler, wrap_urlrequest_client,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
     use objc::declare::ClassDecl;
@@ -133,6 +136,9 @@ mod native {
     const CORNER_RADIUS: f64 = 9.0;
     const HOLE_RADIUS: f64 = 8.0;
     const EXTENSIONS_SETTLE: Duration = Duration::from_millis(5000);
+    // cef_urlrequest_flags_t.
+    const SKIP_CACHE: i32 = 1 << 0;
+    const ALLOW_STORED_CREDENTIALS: i32 = 1 << 3;
     const SCRIPTS_REACH_PAGES: Duration = Duration::from_millis(150);
     const LEFT_MOUSE_DOWN: u64 = 1;
     const RIGHT_MOUSE_DOWN: u64 = 3;
@@ -181,6 +187,13 @@ mod native {
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static STARTED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+        // Private panes' pages (by id), and the in-memory session they share while any is open.
+        static PRIVATE_IDS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+        static PRIVATE_CONTEXT: RefCell<Option<RequestContext>> = const { RefCell::new(None) };
+        // Who the profile is signed in to Google as ({signedIn, email, name}), and the answer coming in.
+        static GOOGLE: RefCell<serde_json::Value> = const { RefCell::new(serde_json::Value::Null) };
+        static GOOGLE_BODY: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+        static GOOGLE_REQUEST: RefCell<Option<Urlrequest>> = const { RefCell::new(None) };
         static STARTED_WALL: Cell<Option<SystemTime>> = const { Cell::new(None) };
         // When the autofill extension said extensions are loaded (its helper touches a file).
         static EXTENSIONS_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -768,14 +781,15 @@ mod native {
         }
     }
 
-    fn create_browser(host: Id, url: &str, width: i32, height: i32) -> Option<Browser> {
+    fn create_browser(host: Id, url: &str, width: i32, height: i32, private: bool) -> Option<Browser> {
         let bounds = CefRect { x: 0, y: 0, width, height };
         let info = WindowInfo { runtime_style: RuntimeStyle::ALLOY, ..Default::default() }
             .set_as_child(host as cef::sys::cef_window_handle_t, &bounds);
         let mut client = PageClient::new();
+        let mut session = private.then(private_context).flatten();
         let browser = cef::browser_host_create_browser_sync(
             Some(&info), Some(&mut client), Some(&CefString::from(url)),
-            Some(&BrowserSettings::default()), None, None,
+            Some(&BrowserSettings::default()), None, session.as_mut(),
         )?;
         if let Some(browser_host) = browser.host() {
             let view = browser_host.window_handle() as Id;
@@ -972,7 +986,8 @@ mod native {
                 url = "about:blank".to_owned();
             }
             let nested = IN_CEF.replace(true);
-            let browser = create_browser(host, &url, width as i32, height as i32);
+            let private = PRIVATE_IDS.with_borrow(|ids| ids.contains(id));
+            let browser = create_browser(host, &url, width as i32, height as i32, private);
             IN_CEF.set(nested);
             if !nested && PUMP_AGAIN.take() {
                 schedule(0);
@@ -1273,6 +1288,84 @@ mod native {
         }
     }
 
+    /// The private panes' session: in memory only (no cache folder), shared while any is open.
+    fn private_context() -> Option<RequestContext> {
+        PRIVATE_CONTEXT.with_borrow_mut(|context| {
+            if context.is_none() {
+                let settings = RequestContextSettings { persist_session_cookies: 0, ..Default::default() };
+                *context = cef::request_context_create_context(Some(&settings), None);
+            }
+            context.clone()
+        })
+    }
+
+    pub fn is_private(id: &str) -> bool {
+        PRIVATE_IDS.with_borrow(|ids| ids.contains(id))
+    }
+
+    /// Who the profile is signed in to Google as, from the last `google` ask.
+    pub fn google_account() -> serde_json::Value {
+        GOOGLE.with_borrow(|google| google.clone())
+    }
+
+    wrap_urlrequest_client! {
+        struct GoogleAccounts;
+
+        impl UrlrequestClient {
+            fn on_download_data(&self, _request: Option<&mut Urlrequest>, data: *const u8, data_length: usize) {
+                if data.is_null() {
+                    return;
+                }
+                let chunk = unsafe { std::slice::from_raw_parts(data, data_length) };
+                GOOGLE_BODY.with_borrow_mut(|body| body.get_or_insert_default().extend_from_slice(chunk));
+            }
+
+            fn on_request_complete(&self, _request: Option<&mut Urlrequest>) {
+                let body = GOOGLE_BODY.take().unwrap_or_default();
+                GOOGLE_REQUEST.take();
+                GOOGLE.set(google_from(&body));
+            }
+        }
+    }
+
+    /// Chrome's own account list (`ListAccounts`): ["gaia.l.a.r", [["gaia.l.a", 1, name, email, ...], ...]].
+    fn google_from(body: &[u8]) -> serde_json::Value {
+        let Ok(list) = serde_json::from_slice::<serde_json::Value>(body) else { return serde_json::Value::Null };
+        let first = list.get(1).and_then(|accounts| accounts.as_array()).and_then(|accounts| accounts.first());
+        match first {
+            Some(account) => serde_json::json!({
+                "signedIn": true,
+                "name": account.get(2).and_then(|v| v.as_str()).unwrap_or_default(),
+                "email": account.get(3).and_then(|v| v.as_str()).unwrap_or_default(),
+            }),
+            None => serde_json::json!({ "signedIn": false }),
+        }
+    }
+
+    /// Asks Google, with the profile's own cookies, which account it's signed in as.
+    fn ask_google() {
+        if GOOGLE_REQUEST.with_borrow(|request| request.is_some()) || !STARTED.get() {
+            return;
+        }
+        let Some(request) = cef::request_create() else { return };
+        request.set_url(Some(&CefString::from("https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard")));
+        // A POST with a one-space body, as Chromium sends it; a GET is refused (400).
+        request.set_method(Some(&CefString::from("POST")));
+        if let (Some(mut body), Some(mut element)) = (cef::post_data_create(), cef::post_data_element_create()) {
+            element.set_to_bytes(1, b" ".as_ptr());
+            body.add_element(Some(&mut element));
+            request.set_post_data(Some(&mut body));
+        }
+        request.set_header_by_name(Some(&CefString::from("Content-Type")), Some(&CefString::from("application/x-www-form-urlencoded")), 1);
+        // Stored credentials (the profile's cookies), and never a cached answer.
+        request.set_flags(ALLOW_STORED_CREDENTIALS | SKIP_CACHE);
+        let mut request = request;
+        let mut client = GoogleAccounts::new();
+        GOOGLE_BODY.set(Some(Vec::new()));
+        let started = cef::urlrequest_create(Some(&mut request), Some(&mut client), None);
+        GOOGLE_REQUEST.set(started);
+    }
+
     /// How many holes a page shows now (a mod's popup, Herdr's popups and toasts over it).
     pub fn holes(id: &str) -> usize {
         VIEWS.with(|views| views.try_borrow().ok().and_then(|views| views.get(id).map(|view| {
@@ -1326,7 +1419,21 @@ mod native {
             if let Some(view) = VIEWS.with_borrow_mut(|views| views.remove(id)) {
                 close_page(&view);
             }
+            // The last private pane gone, its session goes with it: nothing of it is kept.
+            PRIVATE_IDS.with_borrow_mut(|ids| ids.remove(id));
+            let any_private = VIEWS.with_borrow(|views| views.keys().any(|key| PRIVATE_IDS.with_borrow(|ids| ids.contains(key))));
+            if !any_private {
+                PRIVATE_CONTEXT.take();
+            }
             return;
+        }
+        // Before the page exists: it opens in the private session.
+        if op == "private" {
+            PRIVATE_IDS.with_borrow_mut(|ids| ids.insert(id.to_owned()));
+            return;
+        }
+        if op == "google" {
+            return ask_google();
         }
         let exists = VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.browser.is_some()));
         if op == "navigate" && !exists {
