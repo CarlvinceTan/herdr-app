@@ -47,12 +47,36 @@
 `;
   (document.head || document.documentElement).appendChild(style);
 
+  const icon = (paths) => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    for (const d of paths) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    }
+    return svg;
+  };
+  const button = (act, title, paths) => {
+    const element = document.createElement("button");
+    element.dataset.act = act;
+    element.title = title;
+    if (act !== "save") element.disabled = true;
+    element.appendChild(icon(paths));
+    return element;
+  };
   const dock = document.createElement("div");
   dock.id = DOCK;
-  dock.innerHTML = `
-<button data-act="undo" title="Undo" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
-<button data-act="redo" title="Redo" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
-<button data-act="save" title="Save"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg></button>`;
+  dock.append(
+    button("undo", "Undo", ["M9 14 4 9l5-5", "M4 9h10a6 6 0 0 1 0 12h-3"]),
+    button("redo", "Redo", ["m15 14 5-5-5-5", "M20 9H10a6 6 0 0 0 0 12h3"]),
+    button("save", "Save", ["M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z", "M17 21v-8H7v8", "M7 3v5h8"]),
+  );
   (document.body || document.documentElement).appendChild(dock);
 
   const box = document.createElement("div");
