@@ -272,6 +272,9 @@ mod native {
     // stage it here; the next launch swaps it in before Chromium loads extensions.
     const UBLOCK_API: &str = "https://api.github.com/repos/uBlockOrigin/uBOL-home/releases/latest";
 
+    // The zapper: outline the element under the cursor, click to remove it, undo/redo/save.
+    const ZAPPER_JS: &str = include_str!("zapper.js");
+
     fn ublock_version(dir: &Path) -> Option<Vec<u64>> {
         let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
         let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -2318,6 +2321,11 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             ) {
                 let (Some(browser), Some(frame), Some(context)) = (browser, frame, context) else { return };
                 if frame.is_main() == 0 { return }
+                // What the zapper saved for this site hides again on every load.
+                let saved = r#"(function(){try{const key='herdr.zapper.'+(location.hostname||'');const list=JSON.parse(localStorage.getItem(key)||'[]');if(!Array.isArray(list)||list.length===0)return;const style=document.createElement('style');style.textContent=list.join(',\n')+'{display:none!important;}';const add=()=>{(document.head||document.documentElement).appendChild(style)};if(document.head||document.documentElement){add()}else{addEventListener('DOMContentLoaded',add,{once:true})}}catch{}})();"#;
+                let mut result = None;
+                let mut exception = None;
+                context.eval(Some(&CefString::from(saved)), None, 0, Some(&mut result), Some(&mut exception));
                 let private = PRIVATE_BROWSERS.with_borrow(|private| private.contains(&browser.identifier()));
                 if private == false { return }
                 let code = ublock_scriptlets();
@@ -2604,6 +2612,11 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 "back" => browser.go_back(),
                 "forward" => browser.go_forward(),
                 "reload" => browser.reload(),
+                "zap" => {
+                    if let Some(frame) = browser.main_frame() {
+                        frame.execute_java_script(Some(&CefString::from(ZAPPER_JS)), None, 0);
+                    }
+                }
                 "ublock" | "extensions" => {
                     let (folder, page) = if op == "ublock" { ("ublock".to_owned(), "dashboard.html") } else { (own_extension_folder("extensions-page"), "manage.html") };
                     if let (Some(id), Some(frame)) = (extension_id(&folder), browser.main_frame()) {
