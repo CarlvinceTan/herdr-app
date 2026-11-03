@@ -67,6 +67,14 @@ mod host {
     }
 
     fn answer(request: &Value) -> Result<Value, String> {
+        // The extension's worker has started, so Chromium's extensions are loaded: Herdr lets the
+        // pages it held at launch go (web_view.rs, EXTENSIONS_READY).
+        if request["type"].as_str() == Some("ready") {
+            let dir = std::env::var("HERDR_BROWSER_STATE").map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/herdr-browser"));
+            let _ = std::fs::write(dir.join("extensions-ready"), "");
+            return Ok(json!({}));
+        }
         // The extension sets this from the frame that asked, not from anything the page says.
         let url = request["url"].as_str().ok_or("no page")?;
         let site = site_of(&host_of(url).ok_or("not a web page")?);

@@ -132,7 +132,8 @@ mod native {
     const ZOOMS: [f64; 11] = [0.5, 0.6, 0.7, 0.75, DEFAULT_ZOOM, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
     const CORNER_RADIUS: f64 = 9.0;
     const HOLE_RADIUS: f64 = 8.0;
-    const EXTENSIONS_SETTLE: Duration = Duration::from_millis(2500);
+    const EXTENSIONS_SETTLE: Duration = Duration::from_millis(5000);
+    const SCRIPTS_REACH_PAGES: Duration = Duration::from_millis(150);
     const LEFT_MOUSE_DOWN: u64 = 1;
     const RIGHT_MOUSE_DOWN: u64 = 3;
     const COMMAND_KEY: u64 = 1 << 20;
@@ -180,6 +181,9 @@ mod native {
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
         static STARTED: Cell<bool> = const { Cell::new(false) };
         static STARTED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+        static STARTED_WALL: Cell<Option<SystemTime>> = const { Cell::new(None) };
+        // When the autofill extension said extensions are loaded (its helper touches a file).
+        static EXTENSIONS_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
         // Pages asked for while extensions are still getting ready (page id, address).
         static SETTLING: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
@@ -486,6 +490,7 @@ mod native {
             }
             STARTED.set(true);
             STARTED_AT.set(Some(Instant::now()));
+            STARTED_WALL.set(Some(SystemTime::now()));
             // The debugging port opens on a thread of its own a moment later. It's sealed before
             // the app goes on to start any children, the core among them.
             if debug_port > 0 {
@@ -557,8 +562,20 @@ mod native {
         std::env::var("HERDR_PAGE_SETTLE_MS").ok().and_then(|ms| ms.parse().ok()).map_or(EXTENSIONS_SETTLE, Duration::from_millis)
     }
 
+    /// Held pages wait for the extensions to say they're loaded, plus a moment for their scripts to
+    /// reach new pages, as Chromium holds a navigation until they're ready; at most the settle time.
     fn settling() -> bool {
-        STARTED_AT.get().is_some_and(|at| at.elapsed() < extensions_settle())
+        let Some(started) = STARTED_AT.get() else { return false };
+        if started.elapsed() >= extensions_settle() {
+            return false;
+        }
+        if EXTENSIONS_READY_AT.get().is_none() {
+            let touched = std::fs::metadata(state_dir().join("extensions-ready")).and_then(|m| m.modified()).ok();
+            if touched.is_some_and(|at| STARTED_WALL.get().is_some_and(|start| at >= start)) {
+                EXTENSIONS_READY_AT.set(Some(Instant::now()));
+            }
+        }
+        EXTENSIONS_READY_AT.get().is_none_or(|ready| ready.elapsed() < SCRIPTS_REACH_PAGES)
     }
 
     /// Holds a page's address until extensions are ready; true when it was held.

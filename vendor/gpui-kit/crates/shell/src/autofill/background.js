@@ -16,6 +16,9 @@ const b64url = (data) => {
   return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 };
 setInterval(() => chrome.runtime.getPlatformInfo(() => {}), KEEP_AWAKE);
+// Started means Chromium's extensions are loaded; Herdr holds the pages it reopens at launch until
+// it hears so, or a page would miss their scripts (uBlock's, this one's).
+chrome.runtime.sendNativeMessage(HOST, { type: "ready" }).catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   const url = sender.url;
