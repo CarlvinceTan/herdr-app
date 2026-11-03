@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Herdr: YouTube starts paused",
+  "version": "1",
+  "description": "A video that starts by itself after a restart waits for the person to press play.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["pause.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

@@ -343,7 +343,7 @@ mod native {
     // Herdr's own extensions, written out at start beside uBlock. The extensions page is one, since
     // only an extension may manage the others (Chrome's page doesn't open in a pane). Autofill is the
     // other: it fills from the user's vault through a native messaging host in the app.
-    const OWN_EXTENSIONS: [(&str, &[(&str, &str)]); 3] = [
+    const OWN_EXTENSIONS: [(&str, &[(&str, &str)]); 4] = [
         ("extensions-page", &[
             ("manifest.json", include_str!("extensions-page/manifest.json")),
             ("manage.html", include_str!("extensions-page/manage.html")),
@@ -359,6 +359,10 @@ mod native {
         ("minimal-google", &[
             ("manifest.json", include_str!("minimal-google/manifest.json")),
             ("minimal-google.css", include_str!("minimal-google/minimal-google.css")),
+        ]),
+        ("youtube-pause", &[
+            ("manifest.json", include_str!("youtube-pause/manifest.json")),
+            ("pause.js", include_str!("youtube-pause/pause.js")),
         ]),
     ];
     const AUTOFILL_HOST: &str = "dev.herdr.autofill";
@@ -469,6 +473,7 @@ mod native {
                 let folders: Vec<String> = [
                     "ublock".to_owned(), own_extension_folder("extensions-page"),
                     own_extension_folder("autofill"), own_extension_folder("minimal-google"),
+                    own_extension_folder("youtube-pause"),
                 ]
                     .iter().map(|folder| state_dir().join(folder))
                     .filter(|folder| folder.join("manifest.json").exists())
