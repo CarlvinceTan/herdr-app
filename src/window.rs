@@ -2122,8 +2122,11 @@ impl AppWindow {
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
-            let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
-            let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+            // A report outlives its process (OpenCode back at its shell still says
+            // idle): once the core names a shell in front, it isn't an agent.
+            let shell = shell_in_front(rec);
+            let word = if shell { None } else { rec.get("status").and_then(Value::as_str).map(str::to_owned) };
+            let app = if shell { None } else { rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned) };
             let looking = visible.contains(addr) && self.window_active;
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
@@ -4889,6 +4892,14 @@ fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
     rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).or_else(|| rec.get("argv"))
 }
 
+/// Whether the core says a shell runs in front now (its `foreground`): a
+/// program's last report can outlive it.
+fn shell_in_front(rec: &Value) -> bool {
+    let Some(argv) = rec.get("foreground").and_then(|f| f.get("argv")).and_then(Value::as_array) else { return false };
+    let argv: Vec<String> = argv.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+    crate::programs::of(None, &argv)["key"].as_str() == Some("shell")
+}
+
 /// A terminal's program padding from a core record: the program in the
 /// foreground now, not the agent's last report (which can outlive it).
 fn padding_for_record(rec: &Value) -> Option<[f32; 2]> {
@@ -5123,6 +5134,16 @@ mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
     use serde_json::json;
+
+    #[test]
+    fn a_shell_in_front_ends_the_agent_its_report_outlived() {
+        // OpenCode back at its shell: the core still says idle, the shell says otherwise.
+        let back = json!({ "foreground": { "argv": ["/bin/zsh", "-l"] }, "status": { "app": "opencode", "state": "idle" } });
+        assert!(super::shell_in_front(&back));
+        assert!(!super::shell_in_front(&json!({ "foreground": { "argv": ["opencode"] } })));
+        // A core that doesn't say what runs now keeps the report.
+        assert!(!super::shell_in_front(&json!({ "argv": ["/bin/zsh"] })));
+    }
 
     #[test]
     fn a_program_that_reported_itself_gets_its_padding_before_the_core_sees_it() {
