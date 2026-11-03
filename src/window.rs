@@ -31,6 +31,11 @@ use std::time::{Duration, Instant, SystemTime};
 const HEADER_HEIGHT: f32 = 30.0;
 const HANDLE: f32 = 6.0;
 
+thread_local! {
+    /// The page whose fullscreen put the window in macOS fullscreen: leaving that page leaves it.
+    static PAGE_FULLSCREEN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 // The three native buttons plus their trailing breathing room (also used by the tabs mod).
 const TRAFFIC_LIGHT_WIDTH: f32 = 64.0;
 
@@ -3068,6 +3073,22 @@ impl AppWindow {
                 let Some(name) = Self::arg(a, "name") else { return self.fail("tab.rename needs name (empty: its number)") };
                 let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
                 c.name = name.trim().to_owned();
+            }
+            "page.fullscreen" => {
+                let id = Self::arg(a, "id").unwrap_or_default().to_owned();
+                let on = a.get("on").and_then(Value::as_bool).unwrap_or(false);
+                gpui_shell::web_view::set_fullscreen(&id, on);
+                if on {
+                    if window.is_fullscreen() == false {
+                        window.toggle_fullscreen();
+                        PAGE_FULLSCREEN.with_borrow_mut(|page| *page = Some(id));
+                    }
+                } else {
+                    let ours = PAGE_FULLSCREEN.with_borrow_mut(|page| page.take().as_deref() == Some(id.as_str()));
+                    if ours && window.is_fullscreen() {
+                        window.toggle_fullscreen();
+                    }
+                }
             }
             "tab.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };

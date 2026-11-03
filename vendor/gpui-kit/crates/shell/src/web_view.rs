@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, pages, preload, set_background, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, holes, ids, is_private, order_back, normal_url, on_click, on_fullscreen, pages, preload, set_background, set_fullscreen, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -59,6 +59,8 @@ mod native {
     pub fn place(_: &Window, _: &str, _: Bounds<Pixels>, _: &mut App) {}
     pub fn command(_: &str, _: &str, _: &str) {}
     pub fn on_click(_: impl Fn(String) + 'static) {}
+    pub fn on_fullscreen(_: impl Fn(String, bool) + 'static) {}
+    pub fn set_fullscreen(_: &str, _: bool) {}
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
     pub fn ids() -> Vec<String> { Vec::new() }
@@ -199,6 +201,8 @@ mod native {
     thread_local! {
         static VIEWS: RefCell<HashMap<String, View>> = RefCell::new(HashMap::new());
         static CLICK: RefCell<Option<Box<dyn Fn(String)>>> = const { RefCell::new(None) };
+        // A page entered or left fullscreen, with the pane it belongs to.
+        static FULLSCREEN_CALLBACK: RefCell<Option<Box<dyn Fn(String, bool)>>> = const { RefCell::new(None) };
         static SUSPENDED: Cell<bool> = const { Cell::new(false) };
         static LAST_CLICK: Cell<f64> = const { Cell::new(0.0) };
         static LIBRARY: RefCell<Option<cef::library_loader::LibraryLoader>> = const { RefCell::new(None) };
@@ -219,8 +223,6 @@ mod native {
         // A hidden page of uBlock's, opened at launch because its worker starts only when asked.
         static UBLOCK_PROBE: RefCell<Option<Browser>> = const { RefCell::new(None) };
         static UBLOCK_PROBE_HOST: Cell<Id> = const { Cell::new(NIL) };
-        // A page's fullscreen also put this window in macOS fullscreen, so leaving it undoes that.
-        static WENT_FULLSCREEN: Cell<bool> = const { Cell::new(false) };
         // Pages asked for while extensions are still getting ready (page id, address).
         static SETTLING: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
@@ -696,55 +698,47 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 browser: Option<&mut Browser>,
                 fullscreen: ::std::os::raw::c_int,
             ) {
-                if let Some(browser) = browser {
-                    set_page_fullscreen(browser, fullscreen != 0);
+                let Some(browser) = browser else { return };
+                let identifier = browser.identifier();
+                let id = VIEWS.with_borrow(|views| {
+                    views.iter().find(|(_, view)| {
+                        view.browser.as_ref().is_some_and(|browser| browser.identifier() == identifier)
+                    }).map(|(id, _)| id.clone())
+                });
+                if let Some(id) = id {
+                    FULLSCREEN_CALLBACK.with_borrow(|callback| {
+                        if let Some(callback) = callback {
+                            callback(id, fullscreen != 0);
+                        }
+                    });
                 }
             }
         }
     }
 
-    fn set_page_fullscreen(browser: &mut Browser, on: bool) {
-        const FULLSCREEN_MASK: u64 = 1 << 14;
-        let identifier = browser.identifier();
+    // A page's fullscreen covers the window, and Herdr puts the window itself in fullscreen.
+    // This covers and uncovers the window; the frame to return to is the one layout last gave.
+    pub fn set_fullscreen(id: &str, on: bool) {
         let Some((host, saved)) = VIEWS.with_borrow_mut(|views| {
-            let (_, view) = views.iter_mut().find(|(_, view)| {
-                view.browser.as_ref().is_some_and(|browser| browser.identifier() == identifier)
-            })?;
+            let view = views.get_mut(id)?;
             if view.fullscreen == on {
                 return None;
             }
             view.fullscreen = on;
             Some((view.host, view.saved_frame))
         }) else { return };
-        let window: Id = unsafe { msg_send![host, window] };
-        if window.is_null() {
-            return;
-        }
-        if on {
+        let frame: NsRect = if on {
             let parent: Id = unsafe { msg_send![host, superview] };
-            if !parent.is_null() {
-                let bounds: NsRect = unsafe { msg_send![parent, bounds] };
-                unsafe {
-                    let _: () = msg_send![host, setFrame: bounds];
-                    let _: () = msg_send![parent, addSubview: host positioned: 1i64 relativeTo: NIL];
-                }
+            if parent.is_null() {
+                return;
             }
-            let mask: u64 = unsafe { msg_send![window, styleMask] };
-            if mask & FULLSCREEN_MASK == 0 {
-                WENT_FULLSCREEN.set(true);
-                unsafe { let _: () = msg_send![window, toggleFullscreen: NIL]; }
-            }
+            unsafe { let _: () = msg_send![parent, addSubview: host positioned: 1i64 relativeTo: NIL]; }
+            unsafe { msg_send![parent, bounds] }
         } else {
-            if let Some(frame) = saved {
-                unsafe { let _: () = msg_send![host, setFrame: frame]; }
-            }
-            if WENT_FULLSCREEN.take() {
-                let mask: u64 = unsafe { msg_send![window, styleMask] };
-                if mask & FULLSCREEN_MASK != 0 {
-                    unsafe { let _: () = msg_send![window, toggleFullscreen: NIL]; }
-                }
-            }
-        }
+            let Some(frame) = saved else { return };
+            frame
+        };
+        unsafe { let _: () = msg_send![host, setFrame: frame]; }
     }
 
     // A page that asks for the microphone or camera (voice search, a call) gets them: these are
@@ -1736,6 +1730,10 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
 
     pub fn on_click(callback: impl Fn(String) + 'static) {
         CLICK.with_borrow_mut(|click| *click = Some(Box::new(callback)));
+    }
+
+    pub fn on_fullscreen(callback: impl Fn(String, bool) + 'static) {
+        FULLSCREEN_CALLBACK.with_borrow_mut(|slot| *slot = Some(Box::new(callback)));
     }
 
     // A browser's own record of what's on show. Its display callbacks don't arrive for a page in a

@@ -201,6 +201,7 @@ fn main() {
             #[cfg(target_os = "macos")]
             macos::init(cx);
             gpui_shell::web_view::on_click(|id| crate::mods::request(crate::mods::Request::Run { name: "web.clicked".into(), args: serde_json::json!({ "id": id }) }));
+            gpui_shell::web_view::on_fullscreen(|id, on| crate::mods::request(crate::mods::Request::Run { name: "page.fullscreen".into(), args: serde_json::json!({ "id": id, "on": on }) }));
             if fresh {
                 let width = cx.primary_display().map(|d| f32::from(d.bounds().size.width));
                 let zoom = settings::first_zoom(width);
