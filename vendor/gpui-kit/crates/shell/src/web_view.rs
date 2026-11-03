@@ -145,7 +145,7 @@ mod native {
     const ZOOMS: [f64; 11] = [0.5, 0.6, 0.7, 0.75, DEFAULT_ZOOM, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
     const CORNER_RADIUS: f64 = 9.0;
     const HOLE_RADIUS: f64 = 8.0;
-    const EXTENSIONS_SETTLE: Duration = Duration::from_millis(5000);
+    const EXTENSIONS_SETTLE: Duration = Duration::from_millis(7000);
     // cef_urlrequest_flags_t.
     const SKIP_CACHE: i32 = 1 << 0;
     const ALLOW_STORED_CREDENTIALS: i32 = 1 << 3;
@@ -209,6 +209,8 @@ mod native {
         static STARTED_WALL: Cell<Option<SystemTime>> = const { Cell::new(None) };
         // When the autofill extension said extensions are loaded (its helper touches a file).
         static EXTENSIONS_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+        // When uBlock said its content scripts are registered, which is later than that.
+        static UBLOCK_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
         // Pages asked for while extensions are still getting ready (page id, address).
         static SETTLING: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
@@ -247,16 +249,28 @@ mod native {
         manifest["version"].as_str().map(|v| v.split('.').filter_map(|p| p.parse().ok()).collect())
     }
 
-    // uBO clears its content scripts and registers them again on every start. A page loaded
-    // inside that window gets no scriptlets, and a preloaded YouTube page then keeps its ads.
-    // The set persists from the last run, so the patch leaves it alone when it matches.
+    // Two small edits to uBO Lite, re-applied after an update. It may talk to Herdr's helper, which
+    // reports when its content scripts are in place. And clearing and re-registering them at every
+    // start leaves a window where a page loads with no scriptlets at all and keeps its ads; the set
+    // is kept when unchanged, and the helper hears when a fresh set is registered.
     fn patch_ublock(dir: &Path) {
         const MARK: &str = "// Herdr: keep unchanged content scripts registered.";
-        let file = dir.join("js/scripting-manager.js");
-        let Ok(text) = std::fs::read_to_string(&file) else { return };
-        if text.contains(MARK) {
-            return;
+        const READY_MARK: &str = "// Herdr: the content scripts are in place.";
+        let manifest_file = dir.join("manifest.json");
+        if let Ok(text) = std::fs::read_to_string(&manifest_file) {
+            if let Ok(mut manifest) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(permissions) = manifest["permissions"].as_array_mut() {
+                    if !permissions.iter().any(|p| p.as_str() == Some("nativeMessaging")) {
+                        permissions.push(serde_json::Value::from("nativeMessaging"));
+                        if let Ok(out) = serde_json::to_string_pretty(&manifest) {
+                            let _ = std::fs::write(&manifest_file, out);
+                        }
+                    }
+                }
+            }
         }
+        let file = dir.join("js/scripting-manager.js");
+        let Ok(mut text) = std::fs::read_to_string(&file) else { return };
         const OLD: &str = r#"    ubolLog(`Unregistered all content (css/js)`);
     try {
         await browser.scripting.unregisterContentScripts();
@@ -315,10 +329,29 @@ mod native {
         }
     }
 "#;
-        if !text.contains(OLD) {
-            return;
+        const READY_OLD: &str = "    return true;\n};\n\nexport async function getRegisteredContentScripts() {";
+        const READY_NEW: &str = r#"    // Herdr: the content scripts are in place, so pages held at launch can load with them.
+    try {
+        chrome.runtime.sendNativeMessage('dev.herdr.autofill', { type: 'ublock-ready' }).catch(( ) => { });
+    } catch {
+    }
+
+    return true;
+};
+
+export async function getRegisteredContentScripts() {"#;
+        let mut changed = false;
+        if !text.contains(MARK) && text.contains(OLD) {
+            text = text.replacen(OLD, NEW, 1);
+            changed = true;
         }
-        let _ = std::fs::write(&file, text.replacen(OLD, NEW, 1));
+        if !text.contains(READY_MARK) && text.contains(READY_OLD) {
+            text = text.replacen(READY_OLD, READY_NEW, 1);
+            changed = true;
+        }
+        if changed {
+            let _ = std::fs::write(&file, text);
+        }
     }
 
     fn apply_ublock_update() {
@@ -480,14 +513,19 @@ mod native {
                 }
             }
         }
-        // Chromium starts the host beside the app's own executable, and only for the autofill extension.
+        // Chromium starts the host beside the app's own executable. Autofill asks it for logins;
+        // uBlock tells it when its content scripts are registered, so held pages can load with them.
         let (Ok(exe), Some(id)) = (std::env::current_exe(), extension_id(&own_extension_folder("autofill"))) else { return };
+        let mut origins = vec![format!("chrome-extension://{id}/")];
+        if let Some(ublock) = extension_id("ublock") {
+            origins.push(format!("chrome-extension://{ublock}/"));
+        }
         let manifest = serde_json::json!({
             "name": AUTOFILL_HOST,
             "description": "Herdr Autofill",
             "path": exe.with_file_name("herdr-autofill-host"),
             "type": "stdio",
-            "allowed_origins": [format!("chrome-extension://{id}/")],
+            "allowed_origins": origins,
         });
         let hosts = cache.join("NativeMessagingHosts");
         let _ = std::fs::create_dir_all(&hosts);
@@ -893,7 +931,16 @@ mod native {
                 EXTENSIONS_READY_AT.set(Some(Instant::now()));
             }
         }
-        EXTENSIONS_READY_AT.get().is_none_or(|ready| ready.elapsed() < SCRIPTS_REACH_PAGES)
+        // uBlock starts its worker after the other extensions, and a page that loads before it
+        // registers its content scripts gets no scriptlets, so it keeps its ads.
+        if UBLOCK_READY_AT.get().is_none() {
+            let touched = std::fs::metadata(state_dir().join("ublock-ready")).and_then(|m| m.modified()).ok();
+            if touched.is_some_and(|at| STARTED_WALL.get().is_some_and(|start| at >= start)) {
+                UBLOCK_READY_AT.set(Some(Instant::now()));
+            }
+        }
+        let (Some(extensions), Some(ublock)) = (EXTENSIONS_READY_AT.get(), UBLOCK_READY_AT.get()) else { return true };
+        extensions.max(ublock).elapsed() < SCRIPTS_REACH_PAGES
     }
 
     /// Holds a page's address until extensions are ready; true when it was held.

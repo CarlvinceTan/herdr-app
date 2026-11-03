@@ -66,14 +66,22 @@ mod host {
         let _ = out.flush();
     }
 
+    fn state_dir() -> PathBuf {
+        std::env::var("HERDR_BROWSER_STATE").map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/herdr-browser"))
+    }
+
     fn answer(request: &Value) -> Result<Value, String> {
-        // The extension's worker has started, so Chromium's extensions are loaded: Herdr lets the
-        // pages it held at launch go (web_view.rs, EXTENSIONS_READY).
-        if request["type"].as_str() == Some("ready") {
-            let dir = std::env::var("HERDR_BROWSER_STATE").map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state/herdr-browser"));
-            let _ = std::fs::write(dir.join("extensions-ready"), "");
-            return Ok(json!({}));
+        // Herdr holds the pages it reopens at launch until it hears from both: autofill's worker
+        // says Chromium's extensions are loaded, and uBlock says its content scripts are
+        // registered, which happens later, so a page would otherwise load without its scriptlets
+        // (web_view.rs, EXTENSIONS_READY and UBLOCK_READY).
+        if let Some(kind) = request["type"].as_str() {
+            if kind == "ready" || kind == "ublock-ready" {
+                let marker = if kind == "ready" { "extensions-ready" } else { "ublock-ready" };
+                let _ = std::fs::write(state_dir().join(marker), "");
+                return Ok(json!({}));
+            }
         }
         // The extension sets this from the frame that asked, not from anything the page says.
         let url = request["url"].as_str().ok_or("no page")?;
