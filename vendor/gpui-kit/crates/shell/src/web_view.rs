@@ -81,7 +81,8 @@ mod native {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::ffi::{CStr, CString, c_void};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::Once;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -234,6 +235,80 @@ mod native {
 
     pub fn set_background(color: u32) {
         BACKGROUND.store(color, Ordering::Relaxed);
+    }
+
+    // uBO Lite is an unpacked extension, so it has no store updater: fetch the release and
+    // stage it here; the next launch swaps it in before Chromium loads extensions.
+    const UBLOCK_API: &str = "https://api.github.com/repos/uBlockOrigin/uBOL-home/releases/latest";
+
+    fn ublock_version(dir: &Path) -> Option<Vec<u64>> {
+        let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+        let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+        manifest["version"].as_str().map(|v| v.split('.').filter_map(|p| p.parse().ok()).collect())
+    }
+
+    fn apply_ublock_update() {
+        let dir = state_dir();
+        let next = dir.join("ublock.next");
+        if !next.join("manifest.json").is_file() {
+            return;
+        }
+        let current = dir.join("ublock");
+        let old = dir.join("ublock.old");
+        let _ = std::fs::remove_dir_all(&old);
+        if current.exists() && std::fs::rename(&current, &old).is_err() {
+            return;
+        }
+        if std::fs::rename(&next, &current).is_err() {
+            let _ = std::fs::rename(&old, &current);
+        } else {
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
+
+    fn check_ublock_update() {
+        if std::env::var_os("HERDR_NO_UBLOCK_UPDATE").is_some() {
+            return;
+        }
+        let dir = state_dir();
+        let stamp = dir.join("ublock.update");
+        if std::fs::metadata(&stamp).and_then(|m| m.modified()).ok()
+            .is_some_and(|at| at.elapsed().map(|d| d < Duration::from_secs(24 * 3600)).unwrap_or(false))
+        {
+            return;
+        }
+        let Ok(out) = Command::new("curl").args(["-sL", "--max-time", "15", "-H", "User-Agent: herdr", UBLOCK_API]).output() else { return };
+        if !out.status.success() {
+            return;
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return };
+        let Some(tag) = json["tag_name"].as_str() else { return };
+        let latest: Vec<u64> = tag.split('.').filter_map(|p| p.parse().ok()).collect();
+        let installed = ublock_version(&dir.join("ublock")).unwrap_or_default();
+        if !installed.is_empty() && latest <= installed {
+            let _ = std::fs::write(&stamp, tag);
+            return;
+        }
+        let Some(url) = json["assets"].as_array().and_then(|assets| assets.iter().find_map(|a| {
+            let name = a["name"].as_str()?;
+            name.ends_with(".chromium.zip").then(|| a["browser_download_url"].as_str()).flatten()
+        })) else { return };
+        let zip = dir.join("ublock.download.zip");
+        let ok = Command::new("curl").args(["-sL", "--max-time", "60", "-o"]).arg(&zip).arg(url)
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            return;
+        }
+        let staging = dir.join("ublock.next");
+        let _ = std::fs::remove_dir_all(&staging);
+        let ok = Command::new("unzip").args(["-q", "-o"]).arg(&zip).arg("-d").arg(&staging)
+            .status().map(|s| s.success()).unwrap_or(false);
+        let _ = std::fs::remove_file(&zip);
+        if ok && staging.join("manifest.json").is_file() {
+            let _ = std::fs::write(&stamp, tag);
+        } else {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
     }
 
     // One profile for every copy of the app, so a sign-in holds everywhere. Tests point elsewhere.
@@ -613,6 +688,7 @@ mod native {
         if STARTED.get() {
             return true;
         }
+        apply_ublock_update();
         {
             // Chromium needs to find the app it can talk to, not a plain one it would make itself.
             let _: Id = unsafe { msg_send![class!(GPUIApplication), sharedApplication] };
@@ -651,6 +727,7 @@ mod native {
             STARTED.set(true);
             STARTED_AT.set(Some(Instant::now()));
             STARTED_WALL.set(Some(SystemTime::now()));
+            std::thread::spawn(check_ublock_update);
             // The debugging port opens on a thread of its own a moment later. It's sealed before
             // the app goes on to start any children, the core among them.
             if debug_port > 0 {
