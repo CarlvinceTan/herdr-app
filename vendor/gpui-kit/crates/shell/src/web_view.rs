@@ -211,6 +211,9 @@ mod native {
         static EXTENSIONS_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
         // When uBlock said its content scripts are registered, which is later than that.
         static UBLOCK_READY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+        // A hidden page of uBlock's, opened at launch because its worker starts only when asked.
+        static UBLOCK_PROBE: RefCell<Option<Browser>> = const { RefCell::new(None) };
+        static UBLOCK_PROBE_HOST: Cell<Id> = const { Cell::new(NIL) };
         // Pages asked for while extensions are still getting ready (page id, address).
         static SETTLING: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
@@ -267,6 +270,33 @@ mod native {
                         }
                     }
                 }
+            }
+        }
+        // The page Herdr opens at launch: it wakes uBlock's worker, then waits for the content
+        // scripts to be registered and tells the helper. An extension page can't use inline script.
+        const PROBE_HTML: &str = "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Herdr is waiting for uBlock Lite</title>\n<script src=\"js/herdr-ready.js\"></script>\n";
+        const PROBE_JS: &str = r#"// Wakes uBlock's worker and reports when its content scripts are registered, so the pages
+// Herdr reopened at launch can wait for them instead of loading without any.
+chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
+(async ( ) => {
+    for (;;) {
+        const scripts = await chrome.scripting.getRegisteredContentScripts().catch(( ) => []);
+        if (scripts.length !== 0) {
+            try {
+                await chrome.runtime.sendNativeMessage('dev.herdr.autofill', { type: 'ublock-ready' });
+            } catch {
+            }
+            document.title = 'herdr-ready';
+            return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+})();
+"#;
+        for (path, text) in [("herdr-ready.html", PROBE_HTML), ("js/herdr-ready.js", PROBE_JS)] {
+            let path = dir.join(path);
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+                let _ = std::fs::write(&path, text);
             }
         }
         let file = dir.join("js/scripting-manager.js");
@@ -329,28 +359,41 @@ mod native {
         }
     }
 "#;
-        const READY_OLD: &str = "    return true;\n};\n\nexport async function getRegisteredContentScripts() {";
-        const READY_NEW: &str = r#"    // Herdr: the content scripts are in place, so pages held at launch can load with them.
-    try {
-        chrome.runtime.sendNativeMessage('dev.herdr.autofill', { type: 'ublock-ready' }).catch(( ) => { });
-    } catch {
-    }
-
-    return true;
-};
-
-export async function getRegisteredContentScripts() {"#;
         let mut changed = false;
         if !text.contains(MARK) && text.contains(OLD) {
             text = text.replacen(OLD, NEW, 1);
             changed = true;
         }
-        if !text.contains(READY_MARK) && text.contains(READY_OLD) {
-            text = text.replacen(READY_OLD, READY_NEW, 1);
-            changed = true;
-        }
         if changed {
             let _ = std::fs::write(&file, text);
+        }
+        // Once its startup has settled: the content scripts are either kept from the last run or
+        // just registered, so a page loaded now gets them.
+        const READY_OLD: &str = r#"    const scripts = await getRegisteredContentScripts();
+    if ( scripts.length === 0 ) {
+        await registerContentScripts();
+    }
+
+    toggleDeveloperMode(rulesetConfig.developerMode);
+}"#;
+        const READY_NEW: &str = r#"    const scripts = await getRegisteredContentScripts();
+    if ( scripts.length === 0 ) {
+        await registerContentScripts();
+    }
+
+    toggleDeveloperMode(rulesetConfig.developerMode);
+
+    // Herdr: the content scripts are in place, so pages held at launch can load with them.
+    try {
+        chrome.runtime.sendNativeMessage('dev.herdr.autofill', { type: 'ublock-ready' }).catch(( ) => { });
+    } catch {
+    }
+}"#;
+        let startup = dir.join("js/background.js");
+        let Ok(mut text) = std::fs::read_to_string(&startup) else { return };
+        if !text.contains(READY_MARK) && text.contains(READY_OLD) {
+            text = text.replacen(READY_OLD, READY_NEW, 1);
+            let _ = std::fs::write(&startup, text);
         }
     }
 
@@ -1326,6 +1369,7 @@ export async function getRegisteredContentScripts() {"#;
             let space: NsRect = msg_send![parent, bounds];
             (space, parent)
         };
+        ensure_ublock_probe(parent);
         let created = VIEWS.with_borrow_mut(|views| {
             let view = views.entry(id.to_owned()).or_insert_with(|| View {
                 host: unsafe { new_host(parent) },
@@ -1374,6 +1418,36 @@ export async function getRegisteredContentScripts() {"#;
 
     /// Opens a page before its pane is drawn (a browser pane in a hidden tab), so
     /// coming back to it shows it already loaded. The element adopts it when drawn.
+    // uBlock's worker starts only when something asks it to, and its content scripts are
+    // registered then. Opening one of its own pages at launch wakes it, and that page reports
+    // back when they are in place (its helper touches a file, as autofill's does).
+    fn ensure_ublock_probe(parent: Id) {
+        if parent.is_null() || UBLOCK_PROBE.with_borrow(|probe| probe.is_some()) {
+            return;
+        }
+        let Some(id) = extension_id("ublock") else { return };
+        let url = format!("chrome-extension://{id}/herdr-ready.html");
+        let host = unsafe { new_host(parent) };
+        unsafe {
+            let frame = NsRect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 1.0, h: 1.0 } };
+            let _: () = msg_send![host, setFrame: frame];
+            let _: () = msg_send![host, setHidden: YES];
+        }
+        UBLOCK_PROBE_HOST.set(host);
+        let nested = IN_CEF.replace(true);
+        let browser = create_browser(host, &url, 1, 1, false);
+        IN_CEF.set(nested);
+        if !nested && PUMP_AGAIN.take() {
+            schedule(0);
+        }
+        if let Some(browser) = browser {
+            UBLOCK_PROBE.with_borrow_mut(|probe| *probe = Some(browser));
+        } else {
+            unsafe { let _: () = msg_send![host, removeFromSuperview]; }
+            UBLOCK_PROBE_HOST.set(NIL);
+        }
+    }
+
     pub fn preload(window: &Window, id: &str, url: &str) -> bool {
         if !STARTED.get() || VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.browser.is_some())) {
             return false;
@@ -1385,6 +1459,7 @@ export async function getRegisteredContentScripts() {"#;
         if parent.is_null() {
             return false;
         }
+        ensure_ublock_probe(parent);
         let host = unsafe { new_host(parent) };
         unsafe {
             let frame = NsRect { origin: Point { x: 0.0, y: 0.0 }, size: Size { w: 1.0, h: 1.0 } };
