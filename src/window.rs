@@ -2827,7 +2827,12 @@ impl AppWindow {
             }
             "web.do" => {
                 let text = |key| Self::arg(args, key).unwrap_or("");
-                gpui_shell::web_view::command(text("id"), text("op"), text("arg"));
+                // A page warmed before its pane exists (a pick in progress): the pane opens on it.
+                if text("op") == "preload" {
+                    gpui_shell::web_view::preload(window, text("id"), text("arg"));
+                } else {
+                    gpui_shell::web_view::command(text("id"), text("op"), text("arg"));
+                }
             }
             "web.report" => {
                 let pages = gpui_shell::web_view::pages().into_iter()

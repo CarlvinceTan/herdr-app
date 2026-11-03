@@ -615,10 +615,14 @@ The main ones:
 - Web pages (macOS, this fork's Chromium): a mod draws one with `WebView.new(id)`;
   `web.do {id, op, arg?}` drives it (op: `navigate` with an address or a search,
   `back`, `forward`, `reload`, `zoom` with `in`/`out`/`reset`, `clear-data`,
-  `hole` with `"x y w h"` to let clicks through, `show`, `hide`, `remove`).
+  `hole` with `"x y w h"` to let clicks through, `css` with style text (a page's
+  own touches, kept in one style element), `preload` with an address (start a page
+  before its pane draws), `show`, `hide`, `remove`).
   `web.report` publishes each page's `{url, title, asked, shown}` to the shared
   `web.pages`; `web.clicked {id}` is what a press on a page sends, and focuses
-  the pane that holds it. Agents drive pages through Chrome's DevTools protocol
+  the pane that holds it; `page.fullscreen {id, on?}` shows a page across the
+  window, with the window in macOS fullscreen as a video's fullscreen does
+  (`on: false` leaves it). Agents drive pages through Chrome's DevTools protocol
   at `http://127.0.0.1:9333` (see `browser_debug_port`): `/json/list` lists them,
   and a pane's page matches its `web.pages` entry by url and title. Tools that
   take a browser URL attach there (chrome-devtools-mcp `--browserUrl`, Playwright

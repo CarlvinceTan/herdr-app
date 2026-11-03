@@ -100,7 +100,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.hide", &[], "Hide the app (macOS)."),
     cmd("app.hide_others", &[], "Hide other apps (macOS)."),
     cmd("app.show_all", &[], "Show all apps (macOS)."),
-    cmd("web.do", &[req("id"), req("op"), opt("arg")], "Drive a web page: navigate, back, forward, reload, zoom, clear-data, hole, show, hide, remove."),
+    cmd("web.do", &[req("id"), req("op"), opt("arg")], "Drive a web page: navigate, back, forward, reload, zoom, clear-data, hole, css, preload, show, hide, remove."),
     cmd("web.report", &[], "Publish every web page's address and title to the shared `web.pages`."),
     cmd("web.pages", &[], "List the open web pages: id, address, title, whether it is private, and whether it is shown."),
     cmd("web.clicked", &[req("id")], "A press landed on a web page: focus its pane."),

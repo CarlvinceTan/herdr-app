@@ -2375,6 +2375,15 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                         give_keys(id);
                     }
                 }
+                // A page's own style, for Herdr's touches (hiding a site's chrome): one style
+                // element per page, replaced when a mod sends another.
+                "css" => {
+                    let css = serde_json::to_string(arg).unwrap_or_else(|_| "\"\"".into());
+                    if let Some(frame) = browser.main_frame() {
+                        let code = format!("(()=>{{let s=document.getElementById('herdr-site-css');if(!s){{s=document.createElement('style');s.id='herdr-site-css';(document.head||document.documentElement).appendChild(s);}}s.textContent={css};}})()");
+                        frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
+                    }
+                }
                 "zoom" | "clear-data" | "show" | "hide" => {}
                 other => tracing::warn!("web view: unknown command {other:?}"),
             }
