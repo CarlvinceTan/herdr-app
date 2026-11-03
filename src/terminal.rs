@@ -350,8 +350,9 @@ impl TerminalView {
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
-        let title = {
+        let (title, left_full_screen) = {
             let mut g = self.grid.borrow_mut();
+            let was_full_screen = g.vt.alt_screen();
             for item in batch {
                 match item {
                     Stream::Data(bytes) => {
@@ -387,8 +388,15 @@ impl TerminalView {
                     }
                 }
             }
-            g.vt.take_title()
+            (g.vt.take_title(), was_full_screen && !g.vt.alt_screen())
         };
+        // A full-screen program that exits (OpenCode back to its shell) hands back
+        // the normal screen; give it the layout's padding now, not at the next
+        // terminal listing, so it never draws once without it.
+        if left_full_screen && self.program_padding.is_some() {
+            self.program_padding = None;
+            cx.notify();
+        }
         if let Some(title) = title {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
