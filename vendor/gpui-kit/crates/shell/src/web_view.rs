@@ -91,12 +91,13 @@ mod native {
         App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, ImplMediaAccessCallback, ImplPermissionHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient,
-        ContextMenuHandler, ContextMenuParams, LifeSpanHandler, MediaAccessCallback, MenuModel, PermissionHandler,
+        ContextMenuHandler, ContextMenuParams, DisplayHandler, LifeSpanHandler, MediaAccessCallback, MenuModel, PermissionHandler,
         PopupFeatures, Rect as CefRect, RequestContext, RequestContextSettings, RuntimeStyle, Settings,
         Urlrequest, UrlrequestClient, WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler,
-        WrapClient, WrapContextMenuHandler, WrapLifeSpanHandler, WrapPermissionHandler, WrapUrlrequestClient,
+        WrapClient, WrapContextMenuHandler, WrapDisplayHandler, WrapLifeSpanHandler, WrapPermissionHandler, WrapUrlrequestClient,
         rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_context_menu_handler,
-        wrap_life_span_handler, wrap_permission_handler, wrap_urlrequest_client,
+        wrap_display_handler, wrap_life_span_handler, wrap_permission_handler, wrap_urlrequest_client,
+        ImplDisplayHandler,
         EventFlags, ImplContextMenuHandler, ImplContextMenuParams, ImplMenuModel,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
@@ -180,6 +181,10 @@ mod native {
         hole: Option<[f64; 4]>,
         // While the pane is private: its normal page, parked and hidden, to come back as it was.
         normal: Option<Browser>,
+        // A page asked for fullscreen (a video): the page covers the window, and the window is
+        // in macOS fullscreen until the page leaves it. The frame to return to is kept.
+        fullscreen: bool,
+        saved_frame: Option<NsRect>,
     }
 
     /// Herdr's own popups and toasts over pages, in window coordinates: the page shows a hole
@@ -214,6 +219,8 @@ mod native {
         // A hidden page of uBlock's, opened at launch because its worker starts only when asked.
         static UBLOCK_PROBE: RefCell<Option<Browser>> = const { RefCell::new(None) };
         static UBLOCK_PROBE_HOST: Cell<Id> = const { Cell::new(NIL) };
+        // A page's fullscreen also put this window in macOS fullscreen, so leaving it undoes that.
+        static WENT_FULLSCREEN: Cell<bool> = const { Cell::new(false) };
         // Pages asked for while extensions are still getting ready (page id, address).
         static SETTLING: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static IN_CEF: Cell<bool> = const { Cell::new(false) };
@@ -664,12 +671,78 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 Some(PagePopups::new())
             }
 
+            fn display_handler(&self) -> Option<DisplayHandler> {
+                Some(PageFullscreen::new())
+            }
+
             fn permission_handler(&self) -> Option<PermissionHandler> {
                 Some(PagePermissions::new())
             }
 
             fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
                 Some(PageMenu::new())
+            }
+        }
+    }
+
+    // A video's fullscreen takes the screen, as it does in Safari: the page covers the window and
+    // the window goes into macOS fullscreen, rather than the video filling only its pane.
+    wrap_display_handler! {
+        struct PageFullscreen;
+
+        impl DisplayHandler {
+            fn on_fullscreen_mode_change(
+                &self,
+                browser: Option<&mut Browser>,
+                fullscreen: ::std::os::raw::c_int,
+            ) {
+                if let Some(browser) = browser {
+                    set_page_fullscreen(browser, fullscreen != 0);
+                }
+            }
+        }
+    }
+
+    fn set_page_fullscreen(browser: &mut Browser, on: bool) {
+        const FULLSCREEN_MASK: u64 = 1 << 14;
+        let identifier = browser.identifier();
+        let Some((host, saved)) = VIEWS.with_borrow_mut(|views| {
+            let (_, view) = views.iter_mut().find(|(_, view)| {
+                view.browser.as_ref().is_some_and(|browser| browser.identifier() == identifier)
+            })?;
+            if view.fullscreen == on {
+                return None;
+            }
+            view.fullscreen = on;
+            Some((view.host, view.saved_frame))
+        }) else { return };
+        let window: Id = unsafe { msg_send![host, window] };
+        if window.is_null() {
+            return;
+        }
+        if on {
+            let parent: Id = unsafe { msg_send![host, superview] };
+            if !parent.is_null() {
+                let bounds: NsRect = unsafe { msg_send![parent, bounds] };
+                unsafe {
+                    let _: () = msg_send![host, setFrame: bounds];
+                    let _: () = msg_send![parent, addSubview: host positioned: 1i64 relativeTo: NIL];
+                }
+            }
+            let mask: u64 = unsafe { msg_send![window, styleMask] };
+            if mask & FULLSCREEN_MASK == 0 {
+                WENT_FULLSCREEN.set(true);
+                unsafe { let _: () = msg_send![window, toggleFullscreen: NIL]; }
+            }
+        } else {
+            if let Some(frame) = saved {
+                unsafe { let _: () = msg_send![host, setFrame: frame]; }
+            }
+            if WENT_FULLSCREEN.take() {
+                let mask: u64 = unsafe { msg_send![window, styleMask] };
+                if mask & FULLSCREEN_MASK != 0 {
+                    unsafe { let _: () = msg_send![window, toggleFullscreen: NIL]; }
+                }
             }
         }
     }
@@ -1383,10 +1456,19 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 asked: 0,
                 hole: None,
                 normal: None,
+                fullscreen: false,
+                saved_frame: None,
             });
             view.top = top;
             view.left = left;
-            let frame = NsRect { origin: Point { x: left, y: space.size.h - top - height }, size: Size { w: width, h: height } };
+            // A fullscreen page covers the window; the pane's bounds come back when it ends.
+            let frame = if view.fullscreen {
+                NsRect { origin: Point { x: 0.0, y: 0.0 }, size: space.size }
+            } else {
+                let frame = NsRect { origin: Point { x: left, y: space.size.h - top - height }, size: Size { w: width, h: height } };
+                view.saved_frame = Some(frame);
+                frame
+            };
             unsafe {
                 let _: () = msg_send![view.host, setFrame: frame];
             }
@@ -1483,6 +1565,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             views.insert(id.to_owned(), View {
                 host, browser: Some(browser), url: url.to_owned(), title: String::new(),
                 zoom: DEFAULT_ZOOM, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
+                fullscreen: false, saved_frame: None,
             });
         });
         apply_visibility();
