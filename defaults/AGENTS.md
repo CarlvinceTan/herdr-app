@@ -665,7 +665,7 @@ What's about the user, never a look:
   including the Play buttons in Settings > Alerts.
 - `compact_panels`: show Usage and Resources as compact grids of rings
   instead of bars, graphs and lists. Settings > Panels has the switch.
-- `merge_panels`: put Usage and Resources in one pane titled Usage,
+- `merge_panels`: put Usage and Resources in one pane titled Resources,
   with Usage first. Settings > Panels has the switch.
 - `machine_order`: the machines' order in the sidebar and the resource
   rows (`["", "cvmini"]`; `""` is this computer). Settings > Machines has

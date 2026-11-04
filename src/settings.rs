@@ -373,7 +373,7 @@ pub struct Person {
     /// Show Usage and Resources as compact grids of rings.
     #[serde(skip_serializing_if = "is_false")]
     pub compact_panels: bool,
-    /// Put Usage and Resources in one pane titled Usage, Usage first.
+    /// Put Usage and Resources in one pane, Usage first.
     #[serde(skip_serializing_if = "is_false")]
     pub merge_panels: bool,
     /// The machines' order in the sidebar and the resource rows: names, with "" for this computer.

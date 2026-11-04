@@ -532,8 +532,8 @@ export default class Settings extends View {
       .child(
         this.row(
           t,
-          "Merge into Usage",
-          "One Usage pane: Usage first, then Resources.",
+          "Merge into Resources",
+          "One Resources pane: Usage first, then Resources.",
           this.toggle(t, "st-merge-panels", Boolean(p.merge_panels), (_e, cx) =>
             this.change((q) => {
               if (q.merge_panels) delete q.merge_panels;
