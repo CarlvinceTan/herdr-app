@@ -558,6 +558,19 @@ export default class Settings extends View {
       .child(
         this.row(
           t,
+          "Merge into Resources",
+          "One Resources pane: Usage first, then Resources.",
+          this.toggle(t, "st-merge-panels", Boolean(p.merge_panels), (_e, cx) =>
+            this.change((q) => {
+              if (q.merge_panels) delete q.merge_panels;
+              else q.merge_panels = true;
+            }, cx),
+          ),
+        ),
+      )
+      .child(
+        this.row(
+          t,
           "Resources to show",
           "Turn categories off to leave them out of both modes.",
           h_flex()

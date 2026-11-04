@@ -665,6 +665,8 @@ What's about the user, never a look:
   including the Play buttons in Settings > Alerts.
 - `compact_panels`: show Usage and Resources as compact grids of rings
   instead of bars, graphs and lists. Settings > Panels has the switch.
+- `merge_panels`: put Usage and Resources in one pane titled Resources,
+  with Usage first. Settings > Panels has the switch.
 - `resources_hidden`: resource categories to leave out (`cpu`, `gpu`,
   `mem`, `energy`, `disk`, `network`). Settings > Panels toggles each one.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks

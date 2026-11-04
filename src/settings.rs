@@ -373,6 +373,9 @@ pub struct Person {
     /// Show Usage and Resources as compact grids of rings.
     #[serde(skip_serializing_if = "is_false")]
     pub compact_panels: bool,
+    /// Put Usage and Resources in one pane, Usage first.
+    #[serde(skip_serializing_if = "is_false")]
+    pub merge_panels: bool,
     /// Resource categories to leave out (cpu, gpu, mem, energy, disk, network).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resources_hidden: Vec<String>,
@@ -458,6 +461,7 @@ impl Default for Person {
             zoom: 1.0,
             sounds: Sounds::default(),
             compact_panels: false,
+            merge_panels: false,
             resources_hidden: Vec::new(),
             core: None,
             pane_chooser: None,
@@ -504,6 +508,7 @@ pub struct Settings {
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
     pub compact_panels: bool,
+    pub merge_panels: bool,
     pub resources_hidden: Vec<String>,
 }
 
@@ -546,6 +551,7 @@ impl Default for Settings {
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
             compact_panels: false,
+            merge_panels: false,
             resources_hidden: Vec::new(),
         }
     }
@@ -584,6 +590,7 @@ impl Settings {
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
             compact_panels: person.compact_panels,
+            merge_panels: person.merge_panels,
             resources_hidden: person.resources_hidden.clone(),
         }
     }
