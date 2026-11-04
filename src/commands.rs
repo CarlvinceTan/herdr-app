@@ -57,6 +57,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.next", &[], "Show the next tab."),
     cmd("tab.prev", &[], "Show the previous tab."),
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
+    cmd("page.media", &[opt("id"), opt("on")], "A page entered or left its own fullscreen, a video filling the pane (not the window)."),
     cmd("page.fullscreen", &[opt("id"), opt("on")], "Show a page across the window, with the window in macOS fullscreen, as a video's fullscreen does; `on` false leaves it."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
     cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
