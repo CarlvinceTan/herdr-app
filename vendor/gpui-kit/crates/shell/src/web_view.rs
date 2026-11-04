@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_media_fullscreen, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_media_fullscreen, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -62,6 +62,8 @@ mod native {
     pub fn on_fullscreen(_: impl Fn(String, bool) + 'static) {}
     pub fn on_zoom(_: impl Fn() + 'static) {}
     pub fn set_fullscreen(_: &str, _: bool) {}
+    pub fn set_media_fullscreen(_: &str, _: bool) {}
+    pub fn is_media_fullscreen(_: &str) -> bool { false }
     pub fn helper_main() {}
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
@@ -188,9 +190,10 @@ mod native {
         hole: Option<[f64; 4]>,
         // While the pane is private: its normal page, parked and hidden, to come back as it was.
         normal: Option<Browser>,
-        // A page asked for fullscreen (a video): the page covers the window, and the window is
-        // in macOS fullscreen until the page leaves it.
-        fullscreen: bool,
+        // The page asked for fullscreen (a video): it fills the pane. Herdr can then lift it to
+        // the whole window and macOS fullscreen, and put it back when that ends.
+        media_fullscreen: bool,
+        os_fullscreen: bool,
     }
 
     /// Herdr's own popups and toasts over pages, in window coordinates: the page shows a hole
@@ -724,10 +727,13 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             ) {
                 let Some(browser) = browser else { return };
                 let identifier = browser.identifier();
-                let id = VIEWS.with_borrow(|views| {
-                    views.iter().find(|(_, view)| {
+                let id = VIEWS.with_borrow_mut(|views| {
+                    views.iter_mut().find(|(_, view)| {
                         view.browser.as_ref().is_some_and(|browser| browser.identifier() == identifier)
-                    }).map(|(id, _)| id.clone())
+                    }).map(|(id, view)| {
+                        view.media_fullscreen = fullscreen != 0;
+                        id.clone()
+                    })
                 });
                 if let Some(id) = id {
                     FULLSCREEN_CALLBACK.with_borrow(|callback| {
@@ -740,12 +746,25 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         }
     }
 
-    // A page's fullscreen covers the window, and Herdr puts the window itself in fullscreen.
-    // This covers and uncovers the window; the frame to return to is the one layout last gave.
+    /// Whether this page is in its own fullscreen (a video filling the pane).
+    pub fn is_media_fullscreen(id: &str) -> bool {
+        VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.media_fullscreen))
+    }
+
+    pub fn set_media_fullscreen(id: &str, on: bool) {
+        VIEWS.with_borrow_mut(|views| {
+            if let Some(view) = views.get_mut(id) {
+                view.media_fullscreen = on;
+            }
+        });
+    }
+
+    // A page's fullscreen lifted to the window: covers and uncovers it, and Herdr puts the
+    // window itself in macOS fullscreen.
     pub fn set_fullscreen(id: &str, on: bool) {
         let Some(host) = VIEWS.with_borrow_mut(|views| {
             let view = views.get_mut(id)?;
-            view.fullscreen = on;
+            view.os_fullscreen = on;
             Some(view.host)
         }) else { return };
         if on == false {
@@ -1493,12 +1512,13 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 asked: 0,
                 hole: None,
                 normal: None,
-                fullscreen: false,
+                media_fullscreen: false,
+                os_fullscreen: false,
             });
             view.top = top;
             view.left = left;
-            // A fullscreen page covers the window; the pane's bounds come back when it ends.
-            let frame = if view.fullscreen {
+            // A page lifted to the window covers it; the pane's bounds come back when it ends.
+            let frame = if view.os_fullscreen {
                 NsRect { origin: Point { x: 0.0, y: 0.0 }, size: space.size }
             } else {
                 NsRect { origin: Point { x: left, y: space.size.h - top - height }, size: Size { w: width, h: height } }
@@ -1599,7 +1619,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             views.insert(id.to_owned(), View {
                 host, browser: Some(browser), url: url.to_owned(), title: String::new(),
                 zoom: DEFAULT_ZOOM, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
-                fullscreen: false,
+                media_fullscreen: false, os_fullscreen: false,
             });
         });
         apply_visibility();

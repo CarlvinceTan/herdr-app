@@ -2839,7 +2839,8 @@ impl AppWindow {
                         let private = gpui_shell::web_view::is_private(&id);
                         // A private pane's normal page: where it comes back to (after a restart too).
                         let normal = gpui_shell::web_view::normal_url(&id);
-                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal }))
+                        let fullscreen = gpui_shell::web_view::is_media_fullscreen(&id);
+                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal, "fullscreen": fullscreen }))
                     })
                     .collect::<serde_json::Map<String, Value>>();
                 let mut pages = pages;
@@ -3083,6 +3084,22 @@ impl AppWindow {
                 let Some(name) = Self::arg(a, "name") else { return self.fail("tab.rename needs name (empty: its number)") };
                 let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
                 c.name = name.trim().to_owned();
+            }
+            "page.media" => {
+                let id = Self::arg(a, "id").unwrap_or_default().to_owned();
+                let on = a.get("on").and_then(Value::as_bool).unwrap_or(false);
+                gpui_shell::web_view::set_media_fullscreen(&id, on);
+                if !on {
+                    // The page left fullscreen: give the window back too, if a page took it.
+                    let ours = PAGE_FULLSCREEN.with_borrow_mut(|page| page.take().as_deref() == Some(id.as_str()));
+                    if ours {
+                        gpui_shell::web_view::set_fullscreen(&id, false);
+                        if window.is_fullscreen() {
+                            window.toggle_fullscreen();
+                        }
+                    }
+                }
+                cx.notify();
             }
             "page.fullscreen" => {
                 let id = Self::arg(a, "id").unwrap_or_default().to_owned();
@@ -3547,6 +3564,13 @@ impl AppWindow {
                 self.drain_documents(window, cx);
                 crate::update::relaunch();
                 cx.quit();
+            }
+            // From a page's fullscreen, minimise goes back to the pane first, then the window.
+            "window.minimize" if window.is_fullscreen() && PAGE_FULLSCREEN.with_borrow(|page| page.is_some()) => {
+                let id = PAGE_FULLSCREEN.with_borrow_mut(|page| page.take()).unwrap_or_default();
+                gpui_shell::web_view::set_fullscreen(&id, false);
+                window.toggle_fullscreen();
+                cx.notify();
             }
             "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
             // Hiding apps is macOS's (bound natively there).
