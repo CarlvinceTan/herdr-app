@@ -4137,6 +4137,9 @@ impl AppWindow {
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        // A tab's only pane is focused by being the only one: its border stays the plain one,
+        // so closing the other pane can't show a focus ring that the terminal view then covers.
+        let on = on && self.model.active_tab().is_some_and(|c| c.root.panes().len() > 1);
         let line = if on { f.focus.as_ref().or(f.border.as_ref()) } else { f.border.as_ref() };
         let group = SharedString::from(format!("pane-{}", n.id));
         let mut el = div().size_full().relative().flex().flex_col().overflow_hidden().group(group.clone());
