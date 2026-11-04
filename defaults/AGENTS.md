@@ -622,7 +622,8 @@ The main ones:
   `web.pages`; `web.clicked {id}` is what a press on a page sends, and focuses
   the pane that holds it; `page.fullscreen {id, on?}` shows a page across the
   window, with the window in macOS fullscreen as a video's fullscreen does
-  (`on: false` leaves it). Agents drive pages through Chrome's DevTools protocol
+  (`on: false` leaves it); `page.media {id, on?}` says a page entered or left
+  its own video fullscreen, filling the pane rather than the window. Agents drive pages through Chrome's DevTools protocol
   at `http://127.0.0.1:9333` (see `browser_debug_port`): `/json/list` lists them,
   and a pane's page matches its `web.pages` entry by url and title. Tools that
   take a browser URL attach there (chrome-devtools-mcp `--browserUrl`, Playwright
@@ -662,6 +663,10 @@ What's about the user, never a look:
   goes there when clicked. `done` / `blocked` replace the bundled MP3s
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
+- `compact_panels`: show Usage and Resources as compact grids of rings
+  instead of bars, graphs and lists. Settings > Look has the switch.
+- `resources_hidden`: resource categories to leave out (`cpu`, `gpu`,
+  `mem`, `energy`, `disk`, `network`). Settings > Look toggles each one.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.

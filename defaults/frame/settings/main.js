@@ -461,6 +461,32 @@ export default class Settings extends View {
     const p = this.person;
     const own = (key, composed, def) => (p[key] ?? def) !== composed;
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
+    const hidden = new Set(p.resources_hidden ?? []);
+    const category = ([key, label]) => {
+      const on = !hidden.has(key);
+      return h_flex()
+        .id(`st-cat-${key}`)
+        .gap(6)
+        .px(10)
+        .py(5)
+        .rounded(7)
+        .border_1()
+        .border_color(on ? t.accent : "#00000000")
+        .bg(on ? t.raised : "#00000000")
+        .cursor_pointer()
+        .hover((st) => st.bg(t.hover))
+        .on_click((_e, cx) =>
+          this.change((q) => {
+            const next = new Set(q.resources_hidden ?? []);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            if (next.size) q.resources_hidden = [...next];
+            else delete q.resources_hidden;
+          }, cx),
+        )
+        .child(div().w(7).h(7).flex_none().rounded(4).bg(on ? t.accent : t.muted))
+        .child(div().text_size(12.5).text_color(on ? t.foreground : t.muted).child(label));
+    };
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
         .w_full()
@@ -505,7 +531,35 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(div().h(18))
+      .child(this.heading(t, "Panels"))
+      .child(
+        this.row(
+          t,
+          "Compact Usage and Resources",
+          "Rings instead of bars, graphs and lists. Credits keep their amounts.",
+          this.toggle(t, "st-compact-panels", Boolean(p.compact_panels), (_e, cx) =>
+            this.change((q) => {
+              if (q.compact_panels) delete q.compact_panels;
+              else q.compact_panels = true;
+            }, cx),
+          ),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          "Resources to show",
+          "Turn categories off to leave them out of both modes.",
+          h_flex()
+            .max_w(420)
+            .flex_wrap()
+            .justify_end()
+            .gap(6)
+            .children([["cpu", "CPU"], ["gpu", "GPU"], ["mem", "Memory"], ["energy", "Energy"], ["disk", "Disk"], ["network", "Network"]].map(category)),
+        ),
+      );
   }
 
   keyboard(t) {
