@@ -8,6 +8,7 @@ const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
   { id: "look", title: "Look", icon: "palette" },
+  { id: "panels", title: "Panels", icon: "panels" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "machines", title: "Machines", icon: "server" },
   { id: "alerts", title: "Alerts", icon: "bell" },
@@ -461,32 +462,6 @@ export default class Settings extends View {
     const p = this.person;
     const own = (key, composed, def) => (p[key] ?? def) !== composed;
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
-    const hidden = new Set(p.resources_hidden ?? []);
-    const category = ([key, label]) => {
-      const on = !hidden.has(key);
-      return h_flex()
-        .id(`st-cat-${key}`)
-        .gap(6)
-        .px(10)
-        .py(5)
-        .rounded(7)
-        .border_1()
-        .border_color(on ? t.accent : "#00000000")
-        .bg(on ? t.raised : "#00000000")
-        .cursor_pointer()
-        .hover((st) => st.bg(t.hover))
-        .on_click((_e, cx) =>
-          this.change((q) => {
-            const next = new Set(q.resources_hidden ?? []);
-            if (next.has(key)) next.delete(key);
-            else next.add(key);
-            if (next.size) q.resources_hidden = [...next];
-            else delete q.resources_hidden;
-          }, cx),
-        )
-        .child(div().w(7).h(7).flex_none().rounded(4).bg(on ? t.accent : t.muted))
-        .child(div().text_size(12.5).text_color(on ? t.foreground : t.muted).child(label));
-    };
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
         .w_full()
@@ -531,13 +506,46 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
-      .child(div().h(18))
-      .child(this.heading(t, "Panels"))
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+  }
+
+  // Panels ---------------------------------------------------------------
+
+  panels(t, cx) {
+    const p = this.person;
+    const hidden = new Set(p.resources_hidden ?? []);
+    const category = ([key, label]) => {
+      const on = !hidden.has(key);
+      return h_flex()
+        .id(`st-cat-${key}`)
+        .gap(6)
+        .px(10)
+        .py(5)
+        .rounded(7)
+        .border_1()
+        .border_color(on ? t.accent : "#00000000")
+        .bg(on ? t.raised : "#00000000")
+        .cursor_pointer()
+        .hover((st) => st.bg(t.hover))
+        .on_click((_e, cx) =>
+          this.change((q) => {
+            const next = new Set(q.resources_hidden ?? []);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            if (next.size) q.resources_hidden = [...next];
+            else delete q.resources_hidden;
+          }, cx),
+        )
+        .child(div().w(7).h(7).flex_none().rounded(4).bg(on ? t.accent : t.muted))
+        .child(div().text_size(12.5).text_color(on ? t.foreground : t.muted).child(label));
+    };
+    return v_flex()
+      .w_full()
+      .child(this.heading(t, "Usage and Resources"))
       .child(
         this.row(
           t,
-          "Compact Usage and Resources",
+          "Compact",
           "Rings instead of bars, graphs and lists. Credits keep their amounts.",
           this.toggle(t, "st-compact-panels", Boolean(p.compact_panels), (_e, cx) =>
             this.change((q) => {
@@ -965,6 +973,8 @@ export default class Settings extends View {
                   .child(
                     this.section === "look"
                       ? this.look(t, cx)
+                      : this.section === "panels"
+                        ? this.panels(t, cx)
                       : this.section === "keyboard"
                         ? this.keyboard(t)
                       : this.section === "machines"

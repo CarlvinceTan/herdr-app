@@ -664,9 +664,9 @@ What's about the user, never a look:
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
 - `compact_panels`: show Usage and Resources as compact grids of rings
-  instead of bars, graphs and lists. Settings > Look has the switch.
+  instead of bars, graphs and lists. Settings > Panels has the switch.
 - `resources_hidden`: resource categories to leave out (`cpu`, `gpu`,
-  `mem`, `energy`, `disk`, `network`). Settings > Look toggles each one.
+  `mem`, `energy`, `disk`, `network`). Settings > Panels toggles each one.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
