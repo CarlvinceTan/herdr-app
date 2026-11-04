@@ -2840,7 +2840,8 @@ impl AppWindow {
                         // A private pane's normal page: where it comes back to (after a restart too).
                         let normal = gpui_shell::web_view::normal_url(&id);
                         let fullscreen = gpui_shell::web_view::is_media_fullscreen(&id);
-                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal, "fullscreen": fullscreen }))
+                        let media = gpui_shell::web_view::is_playing_media(&id);
+                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal, "fullscreen": fullscreen, "media": media }))
                     })
                     .collect::<serde_json::Map<String, Value>>();
                 let mut pages = pages;

@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_media_fullscreen, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_media_fullscreen, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_media_fullscreen, is_playing_media, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_media_fullscreen, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -64,6 +64,7 @@ mod native {
     pub fn set_fullscreen(_: &str, _: bool) {}
     pub fn set_media_fullscreen(_: &str, _: bool) {}
     pub fn is_media_fullscreen(_: &str) -> bool { false }
+    pub fn is_playing_media(_: &str) -> bool { false }
     pub fn helper_main() {}
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
@@ -97,7 +98,7 @@ mod native {
         App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, ImplMediaAccessCallback, ImplPermissionHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient,
-        ContextMenuHandler, ContextMenuParams, DisplayHandler, LifeSpanHandler, MediaAccessCallback, MenuModel, PermissionHandler,
+        ContextMenuHandler, ContextMenuParams, DisplayHandler, LifeSpanHandler, LogSeverity, MediaAccessCallback, MenuModel, PermissionHandler,
         PopupFeatures, Rect as CefRect, RequestContext, RequestContextHandler, RequestContextSettings, ResourceRequestHandler, ReturnValue,
         RuntimeStyle, Settings, V8Context,
         Callback, Request, Urlrequest, UrlrequestClient, WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler,
@@ -194,6 +195,8 @@ mod native {
         // the whole window and macOS fullscreen, and put it back when that ends.
         media_fullscreen: bool,
         os_fullscreen: bool,
+        // A video or sound in the page is playing (reported by the page's own script).
+        audible: bool,
     }
 
     /// Herdr's own popups and toasts over pages, in window coordinates: the page shows a hole
@@ -720,6 +723,29 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         struct PageFullscreen;
 
         impl DisplayHandler {
+            fn on_console_message(
+                &self,
+                browser: Option<&mut Browser>,
+                _level: LogSeverity,
+                message: Option<&CefString>,
+                _source: Option<&CefString>,
+                _line: ::std::os::raw::c_int,
+            ) -> ::std::os::raw::c_int {
+                let (Some(browser), Some(message)) = (browser, message) else { return 0 };
+                let text = message.to_string();
+                let Some(state) = text.strip_prefix("herdr-media:") else { return 0 };
+                let on = state.starts_with('1');
+                let identifier = browser.identifier();
+                VIEWS.with_borrow_mut(|views| {
+                    if let Some((_, view)) = views.iter_mut().find(|(_, view)| {
+                        view.browser.as_ref().is_some_and(|browser| browser.identifier() == identifier)
+                    }) {
+                        view.audible = on;
+                    }
+                });
+                0
+            }
+
             fn on_fullscreen_mode_change(
                 &self,
                 browser: Option<&mut Browser>,
@@ -749,6 +775,10 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
     /// Whether this page is in its own fullscreen (a video filling the pane).
     pub fn is_media_fullscreen(id: &str) -> bool {
         VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.media_fullscreen))
+    }
+
+    pub fn is_playing_media(id: &str) -> bool {
+        VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.audible))
     }
 
     pub fn set_media_fullscreen(id: &str, on: bool) {
@@ -1514,6 +1544,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 normal: None,
                 media_fullscreen: false,
                 os_fullscreen: false,
+                audible: false,
             });
             view.top = top;
             view.left = left;
@@ -1619,7 +1650,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             views.insert(id.to_owned(), View {
                 host, browser: Some(browser), url: url.to_owned(), title: String::new(),
                 zoom: DEFAULT_ZOOM, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
-                media_fullscreen: false, os_fullscreen: false,
+                media_fullscreen: false, os_fullscreen: false, audible: false,
             });
         });
         apply_visibility();
@@ -2347,6 +2378,11 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 let mut result = None;
                 let mut exception = None;
                 context.eval(Some(&CefString::from(saved)), None, 0, Some(&mut result), Some(&mut exception));
+                // Say when a video or sound starts or stops, so its tab row can show a speaker.
+                let media = r#"(function(){if(window.__herdrMedia)return;window.__herdrMedia=true;let last=null;const check=()=>{let on=false;for(const m of document.querySelectorAll('video,audio')){if(m.paused||m.ended||m.muted||m.volume<=0||m.readyState<2)continue;on=true;break}if(on===last)return;last=on;try{console.log('herdr-media:'+(on?'1':'0'))}catch{}};const attach=()=>{for(const m of document.querySelectorAll('video,audio')){if(m.__herdrMediaWatch)continue;m.__herdrMediaWatch=true;for(const ev of ['play','pause','ended','volumechange','emptied','loadeddata'])m.addEventListener(ev,check,true)}};new MutationObserver(()=>{attach();check()}).observe(document.documentElement||document,{childList:true,subtree:true});setInterval(()=>{attach();check()},1000);attach();check()})();"#;
+                let mut result = None;
+                let mut exception = None;
+                context.eval(Some(&CefString::from(media)), None, 0, Some(&mut result), Some(&mut exception));
                 let private = PRIVATE_BROWSERS.with_borrow(|private| private.contains(&browser.identifier()));
                 if private == false { return }
                 let code = ublock_scriptlets();
