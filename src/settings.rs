@@ -373,12 +373,12 @@ pub struct Person {
     /// Show Usage and Resources as compact grids of rings.
     #[serde(skip_serializing_if = "is_false")]
     pub compact_panels: bool,
-    /// Put Usage and Resources in one pane, Usage first.
+    /// Put Usage and Resources in one pane titled Usage, Usage first.
     #[serde(skip_serializing_if = "is_false")]
     pub merge_panels: bool,
-    /// Resource categories to leave out (cpu, gpu, mem, energy, disk, network).
+    /// The machines' order in the sidebar and the resource rows: names, with "" for this computer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub resources_hidden: Vec<String>,
+    pub machine_order: Vec<String>,
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
@@ -462,7 +462,7 @@ impl Default for Person {
             sounds: Sounds::default(),
             compact_panels: false,
             merge_panels: false,
-            resources_hidden: Vec::new(),
+            machine_order: Vec::new(),
             core: None,
             pane_chooser: None,
             font: None,
@@ -509,7 +509,7 @@ pub struct Settings {
     pub sounds: Sounds,
     pub compact_panels: bool,
     pub merge_panels: bool,
-    pub resources_hidden: Vec<String>,
+    pub machine_order: Vec<String>,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -552,7 +552,7 @@ impl Default for Settings {
             sounds: Sounds::default(),
             compact_panels: false,
             merge_panels: false,
-            resources_hidden: Vec::new(),
+            machine_order: Vec::new(),
         }
     }
 }
@@ -591,7 +591,7 @@ impl Settings {
             option_as_alt: person.option_as_alt,
             compact_panels: person.compact_panels,
             merge_panels: person.merge_panels,
-            resources_hidden: person.resources_hidden.clone(),
+            machine_order: person.machine_order.clone(),
         }
     }
 }

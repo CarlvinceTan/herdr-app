@@ -513,32 +513,6 @@ export default class Settings extends View {
 
   panels(t, cx) {
     const p = this.person;
-    const hidden = new Set(p.resources_hidden ?? []);
-    const category = ([key, label]) => {
-      const on = !hidden.has(key);
-      return h_flex()
-        .id(`st-cat-${key}`)
-        .gap(6)
-        .px(10)
-        .py(5)
-        .rounded(7)
-        .border_1()
-        .border_color(on ? t.accent : "#00000000")
-        .bg(on ? t.raised : "#00000000")
-        .cursor_pointer()
-        .hover((st) => st.bg(t.hover))
-        .on_click((_e, cx) =>
-          this.change((q) => {
-            const next = new Set(q.resources_hidden ?? []);
-            if (next.has(key)) next.delete(key);
-            else next.add(key);
-            if (next.size) q.resources_hidden = [...next];
-            else delete q.resources_hidden;
-          }, cx),
-        )
-        .child(div().w(7).h(7).flex_none().rounded(4).bg(on ? t.accent : t.muted))
-        .child(div().text_size(12.5).text_color(on ? t.foreground : t.muted).child(label));
-    };
     return v_flex()
       .w_full()
       .child(this.heading(t, "Usage and Resources"))
@@ -558,27 +532,14 @@ export default class Settings extends View {
       .child(
         this.row(
           t,
-          "Merge into Resources",
-          "One Resources pane: Usage first, then Resources.",
+          "Merge into Usage",
+          "One Usage pane: Usage first, then Resources.",
           this.toggle(t, "st-merge-panels", Boolean(p.merge_panels), (_e, cx) =>
             this.change((q) => {
               if (q.merge_panels) delete q.merge_panels;
               else q.merge_panels = true;
             }, cx),
           ),
-        ),
-      )
-      .child(
-        this.row(
-          t,
-          "Resources to show",
-          "Turn categories off to leave them out of both modes.",
-          h_flex()
-            .max_w(420)
-            .flex_wrap()
-            .justify_end()
-            .gap(6)
-            .children([["cpu", "CPU"], ["gpu", "GPU"], ["mem", "Memory"], ["energy", "Energy"], ["disk", "Disk"], ["network", "Network"]].map(category)),
         ),
       );
   }
@@ -709,6 +670,7 @@ export default class Settings extends View {
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
           .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : "hc version unknown"}`)))
+        .child(this.moveButtons(t, m.name))
         .child(controls.flex_none()));
     if (busy === "update") row.child(div().text_size(12.5).text_color(t.dim).child("Copying this computer's herdr-core. Its terminals keep running."));
     if (edit && !busy) {
@@ -726,13 +688,49 @@ export default class Settings extends View {
     return row;
   }
 
+  // The sidebar's machine order: names, with null for this computer.
+  machineOrder() {
+    const names = [null, ...(this.machineList ?? []).map((m) => m.name)];
+    const order = this.person.machine_order ?? [];
+    const rank = (n) => { const i = order.indexOf(n ?? ""); return i < 0 ? 1000 : i; };
+    return names.sort((a, b) => rank(a) - rank(b) || String(a ?? "").localeCompare(String(b ?? "")));
+  }
+
+  moveMachine(name, by, cx) {
+    const order = this.machineOrder();
+    const at = order.indexOf(name);
+    const to = at + by;
+    if (at < 0 || to < 0 || to >= order.length) return;
+    [order[at], order[to]] = [order[to], order[at]];
+    this.change((p) => (p.machine_order = order.map((m) => m ?? "")), cx);
+  }
+
+  moveButtons(t, name) {
+    const order = this.machineOrder();
+    const at = order.indexOf(name);
+    const arrow = (label, delta, on) => div()
+      .id(`st-m-${delta > 0 ? "down" : "up"}-${name ?? "local"}`)
+      .size(18).flex().items_center().justify_center().rounded(4).text_size(11)
+      .text_color(on ? t.muted : t.border)
+      .when(on, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => this.moveMachine(name, delta, cx)))
+      .child(label);
+    return h_flex().flex_none().gap(2).items_center()
+      .child(arrow("\u2191", -1, at > 0))
+      .child(arrow("\u2193", 1, at >= 0 && at < order.length - 1));
+  }
+
   machines(t) {
     const version = updates().core.version;
+    const order = this.machineOrder();
+    const remote = new Map((this.machineList ?? []).map((m) => [m.name, m]));
     return v_flex().w_full()
       .child(this.heading(t, "Machines"))
-      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
-      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, div().w(7).h(7).rounded(4).bg(t.ansi2)))
-      .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
+      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect. The arrows set their order in the sidebar and the resource rows."))
+      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, h_flex().gap(6).items_center()
+        .child(this.moveButtons(t, null))
+        .child(div().w(7).h(7).flex_none().rounded(4).bg(t.ansi2))))
+      .children(order.filter((n) => n !== null).map((n) => this.machineRow(t, remote.get(n), version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))
       .when(Boolean(this.machineError), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.machineError)))
