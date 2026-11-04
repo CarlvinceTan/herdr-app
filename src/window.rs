@@ -3182,10 +3182,6 @@ impl AppWindow {
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
                 self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
-                // The closed pane can't stay the one focus is derived from for a frame: the
-                // next pane is focused from the model, not through a stale block first.
-                self.focused_pane = None;
-                self.synced_model_pane = self.model.focused_pane();
             }
             "pane.zoom" => {
                 let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
