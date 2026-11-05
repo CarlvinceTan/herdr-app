@@ -2840,8 +2840,9 @@ impl AppWindow {
                         // A private pane's normal page: where it comes back to (after a restart too).
                         let normal = gpui_shell::web_view::normal_url(&id);
                         let fullscreen = gpui_shell::web_view::is_media_fullscreen(&id);
+                        let lifted = gpui_shell::web_view::is_fullscreen(&id);
                         let media = gpui_shell::web_view::is_playing_media(&id);
-                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal, "fullscreen": fullscreen, "media": media }))
+                        (id, json!({ "url": url, "title": title, "asked": asked, "shown": shown, "holes": holes, "private": private, "normalUrl": normal, "fullscreen": fullscreen, "lifted": lifted, "media": media }))
                     })
                     .collect::<serde_json::Map<String, Value>>();
                 let mut pages = pages;
@@ -4958,7 +4959,19 @@ fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
 fn shell_in_front(rec: &Value) -> bool {
     let Some(argv) = rec.get("foreground").and_then(|f| f.get("argv")).and_then(Value::as_array) else { return false };
     let argv: Vec<String> = argv.iter().filter_map(Value::as_str).map(str::to_owned).collect();
-    crate::programs::of(None, &argv)["key"].as_str() == Some("shell")
+    if crate::programs::of(None, &argv)["key"].as_str() != Some("shell") {
+        return false;
+    }
+    // If an agent is still actively reporting, don't hide it behind a shell.
+    if let Some(report) = rec.get("report") {
+        let state = report.get("state").and_then(Value::as_str);
+        if state == Some("working") || state == Some("blocked") || state == Some("idle") {
+            if report.get("app").and_then(Value::as_str).is_some() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// A terminal's program padding from a core record: the program in the
@@ -4995,11 +5008,15 @@ fn adoptable(record: &Value, space: &str, tab: Option<&str>, machine: Option<&st
 
 fn program_of(report: &Value, argv: Option<&Value>) -> Value {
     let app = report.get("app").and_then(Value::as_str);
+    let state = report.get("state").and_then(Value::as_str);
     let argv: Vec<String> = argv.and_then(Value::as_array).into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect();
     // An agent's report outlives its process: once a shell is in front again,
-    // show the shell, not the agent that started it.
+    // show the shell, not the agent that started it (unless it's still active).
     let running = crate::programs::of(None, &argv);
     if app.is_some() && running["key"].as_str() == Some("shell") {
+        if state == Some("working") || state == Some("blocked") || state == Some("idle") {
+            return crate::programs::of(app, &argv);
+        }
         return running;
     }
     crate::programs::of(app, &argv)

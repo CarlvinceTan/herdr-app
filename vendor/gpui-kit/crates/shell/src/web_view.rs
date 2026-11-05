@@ -51,7 +51,7 @@ impl Element for WebView {
     }
 }
 
-pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_media_fullscreen, is_playing_media, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_media_fullscreen, set_suspended, set_undrawn, start};
+pub use native::{begin_covers, command, cover, google_account, helper_main, holes, ids, is_fullscreen, is_media_fullscreen, is_playing_media, is_private, order_back, normal_url, on_click, on_fullscreen, on_zoom, pages, preload, set_background, set_fullscreen, set_media_fullscreen, set_suspended, set_undrawn, start};
 
 #[cfg(not(target_os = "macos"))]
 mod native {
@@ -65,6 +65,7 @@ mod native {
     pub fn set_media_fullscreen(_: &str, _: bool) {}
     pub fn is_media_fullscreen(_: &str) -> bool { false }
     pub fn is_playing_media(_: &str) -> bool { false }
+    pub fn is_fullscreen(_: &str) -> bool { false }
     pub fn helper_main() {}
     pub fn start(_: i32) -> bool { false }
     pub fn pages() -> Vec<(String, String, String, u64, bool)> { Vec::new() }
@@ -779,6 +780,11 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
 
     pub fn is_playing_media(id: &str) -> bool {
         VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.audible))
+    }
+
+    /// Whether this page is lifted to the whole window (its media fullscreen on macOS fullscreen).
+    pub fn is_fullscreen(id: &str) -> bool {
+        VIEWS.with_borrow(|views| views.get(id).is_some_and(|view| view.os_fullscreen))
     }
 
     pub fn set_media_fullscreen(id: &str, on: bool) {
