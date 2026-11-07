@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    InputBaseState, PrepaintCaretGeometry, RangeDecorationStyle, TextDecoration,
+    InputBaseState, InputEvent, PrepaintCaretGeometry, RangeDecorationStyle, TextDecoration,
     layout::{LastLayout, WhitespaceIndicators},
     mode::LayoutMode,
 };
@@ -3315,6 +3315,18 @@ impl<M: InputModeKind> Element for TextElement<M> {
             state.scroll_size = prepaint.scroll_size;
             state.update_scroll_offset(Some(prepaint.cursor_scroll_offset), cx);
             state.deferred_scroll_offset = None;
+
+            // HERDR: say when the view or the caret moved, whatever moved them, once it's settled.
+            let offset = state.scroll_handle.offset();
+            if state.reported_scroll != Some(offset) {
+                state.reported_scroll = Some(offset);
+                cx.emit(InputEvent::Scroll);
+            }
+            let selection = state.selected_range();
+            if state.reported_selection.as_ref() != Some(&selection) {
+                state.reported_selection = Some(selection);
+                cx.emit(InputEvent::SelectionChange);
+            }
 
             // Layout consumers need changed geometry, not another notification
             // for every paint of an unchanged input.

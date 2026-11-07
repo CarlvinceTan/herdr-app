@@ -3881,7 +3881,12 @@ impl ShellRuntime {
                     payload.set("secondary", *secondary)?;
                     payload.set("shift", *shift)?;
                 }
-                InputEvent::Change | InputEvent::Focus | InputEvent::Blur | InputEvent::PasteWithoutText => {}
+                InputEvent::Change
+                | InputEvent::Focus
+                | InputEvent::Blur
+                | InputEvent::PasteWithoutText
+                | InputEvent::Scroll
+                | InputEvent::SelectionChange => {}
             }
             handler.call::<_, ()>((
                 payload,
@@ -7038,6 +7043,20 @@ globalThis.__gpui = (() => {
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           release: () => __editor_release(handle),
+          // HERDR: where the view and the caret are, for a script drawing beside the text.
+          scroll: () => {
+            const m = __editor_scroll(handle);
+            return m == null ? null : { x: m[0], y: m[1], width: m[2], height: m[3],
+              content_width: m[4], content_height: m[5], line_height: m[6], gutter_width: m[7] };
+          },
+          set_scroll: (offset = {}) =>
+            __editor_set_scroll(handle, offset.x === undefined ? null : Number(offset.x), offset.y === undefined ? null : Number(offset.y)),
+          cursor: () => {
+            const at = __editor_cursor(handle);
+            return { line: at[0], column: at[1] };
+          },
+          set_cursor: (position) =>
+            __editor_set_cursor(handle, Math.max(0, Math.floor(Number(position.line))), Math.max(0, Math.floor(Number(position.column ?? 0)))),
         };
       },
     },

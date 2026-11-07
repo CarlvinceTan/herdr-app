@@ -3141,11 +3141,45 @@ const BASE: &str = r#"  /** A row. */
   export const Textarea: { new: (state: TextareaState) => NativeElement };
 
   // HERDR: built-in source editing and read-only code viewing.
+  /** HERDR: where an editor's view is, in pixels. */
+  export interface EditorScroll {
+    /** How far the text is scrolled, right and down. */
+    x: number;
+    y: number;
+    /** The visible text area, line numbers included. */
+    width: number;
+    height: number;
+    /** Everything there is to scroll through. */
+    content_width: number;
+    content_height: number;
+    line_height: number;
+    /** The line numbers' width: where the text starts. */
+    gutter_width: number;
+  }
   export interface EditorState {
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;
-    on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /**
+     * HERDR: `scroll` arrives after a frame in which the view moved, whatever moved it: the
+     * wheel, the caret following typing, a drag past the edge, `set_scroll`. `cursor` arrives
+     * when the caret or selection moved. Both come once the frame is drawn, so something drawn
+     * beside the text from them is a frame behind; scroll with `set_scroll` and read `scroll()`
+     * in the same render to stay level with it.
+     */
+    on(event: "change" | "submit" | "focus" | "blur" | "paste_other" | "scroll" | "cursor", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** HERDR: where the view is now; null until it has been laid out. */
+    scroll(): EditorScroll | null;
+    /**
+     * HERDR: scrolls so the view starts at `x`, `y` (either may be left out), kept within the
+     * content. It applies at once: `scroll()` reads the new place straight after. Before the
+     * first layout it waits for one.
+     */
+    set_scroll(offset: { x?: number; y?: number }): void;
+    /** HERDR: the caret, 0-based; `column` counts characters, not UTF-16 units. */
+    cursor(): { line: number; column: number };
+    /** HERDR: moves the caret, collapsing any selection, without taking the keyboard. */
+    set_cursor(position: { line: number; column?: number }): void;
     release(): boolean;
   }
   export const EditorState: {
@@ -3164,6 +3198,8 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** HERDR: defaults to true; false draws none, like Zed's `scrollbar.show: never`. */
+      scrollbars?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */

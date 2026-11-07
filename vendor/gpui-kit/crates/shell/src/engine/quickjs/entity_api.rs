@@ -15,7 +15,7 @@ use std::rc::Weak;
 use gpui::ScrollStrategy;
 use gpui_base::NumberStep;
 use gpui_base::VirtualListScrollHandle;
-use gpui_base::input::{InputBaseState, InputModeKind};
+use gpui_base::input::{InputBaseState, InputModeKind, Position};
 use gpui_base::slider::{SliderScale, SliderValue};
 use rquickjs::{
     Ctx, Exception, FromJs, Function, Object, Persistent, Result as JsResult, Value, function::Func,
@@ -493,6 +493,86 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         Func::from(
             move |ctx: Ctx<'_>, handle: EntityHandle, value: String| -> JsResult<()> {
                 write_value(&ctx, &live_editor(&ctx, &write_editor, handle)?, value)
+            },
+        ),
+    )?;
+
+    // HERDR: where the editor's view is: x, y, width, height, content width and height, line
+    // height, gutter width. Null until it has been laid out.
+    let measure_editor = runtime.clone();
+    globals.set(
+        "__editor_scroll",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Option<Vec<f64>>> {
+                let state = live_editor(&ctx, &measure_editor, handle)?;
+                scope::with_current_app(|cx| {
+                    state.read(cx).scroll_metrics().map(|m| {
+                        [
+                            m.offset.x,
+                            m.offset.y,
+                            m.viewport.width,
+                            m.viewport.height,
+                            m.content.width,
+                            m.content.height,
+                            m.line_height,
+                            m.gutter_width,
+                        ]
+                        .into_iter()
+                        .map(|value| f64::from(f32::from(value)))
+                        .collect()
+                    })
+                })
+                .ok_or_else(|| needs_call(&ctx, "scroll()"))
+            },
+        ),
+    )?;
+
+    let scroll_editor = runtime.clone();
+    globals.set(
+        "__editor_set_scroll",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, x: Option<f64>, y: Option<f64>| -> JsResult<()> {
+                let state = live_editor(&ctx, &scroll_editor, handle)?;
+                scope::with_current(|_window, cx| {
+                    state.update(cx, |state, cx| {
+                        let now = state.scroll_metrics().map(|m| m.offset).unwrap_or_default();
+                        let to = gpui::point(
+                            x.map(|x| gpui::px(x as f32)).unwrap_or(now.x),
+                            y.map(|y| gpui::px(y as f32)).unwrap_or(now.y),
+                        );
+                        state.scroll_view_to(to, cx);
+                    });
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_scroll()"))
+            },
+        ),
+    )?;
+
+    let caret_editor = runtime.clone();
+    globals.set(
+        "__editor_cursor",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+                let state = live_editor(&ctx, &caret_editor, handle)?;
+                scope::with_current_app(|cx| {
+                    let at = state.read(cx).cursor_position();
+                    vec![f64::from(at.line), f64::from(at.character)]
+                })
+                .ok_or_else(|| needs_call(&ctx, "cursor()"))
+            },
+        ),
+    )?;
+
+    let move_editor = runtime.clone();
+    globals.set(
+        "__editor_set_cursor",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, line: u32, column: u32| -> JsResult<()> {
+                let state = live_editor(&ctx, &move_editor, handle)?;
+                scope::with_current(|_window, cx| {
+                    state.update(cx, |state, cx| state.move_cursor_to(Position::new(line, column), cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_cursor()"))
             },
         ),
     )?;

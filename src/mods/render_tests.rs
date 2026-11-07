@@ -385,6 +385,31 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn editors_report_and_take_their_scroll_and_caret(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from 'gpui-kit'; import { Editor, EditorState } from 'gpui-base';
+export default class Demo extends View {
+  init() {
+    this.code = EditorState.new({ value: "one\ntwo\nthree", scrollbars: false });
+    this.before = this.code.scroll();
+    this.code.set_scroll({ y: 40 });
+    this.code.set_cursor({ line: 2, column: 1 });
+    this.events = [this.code.on("scroll", () => {}), this.code.on("cursor", () => {})];
+  }
+  render() {
+    const at = this.code.cursor();
+    return div().child(Editor.new(this.code).h(100)).child(`before=${this.before} caret=${at.line}:${at.column} events=${this.events}`);
+  }
+}"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let description = window.update(cx, |_, window, cx| runtime.check(&staged.0, window, cx)).unwrap().unwrap();
+    assert!(description.contains("before=null caret=2:1 events=true,true"), "{description}");
+}
+
+#[gpui::test]
 fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

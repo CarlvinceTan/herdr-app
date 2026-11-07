@@ -131,6 +131,24 @@ pub enum InputEvent {
     Blur,
     /// A paste found no text on the clipboard (an image, say): the owner may read it.
     PasteWithoutText,
+    /// HERDR: the view scrolled, whatever moved it: the wheel, the caret, a script.
+    Scroll,
+    /// HERDR: the caret or the selection moved.
+    SelectionChange,
+}
+
+/// HERDR: where an editor's view is, for whoever draws beside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollMetrics {
+    /// How far the text is scrolled, right and down. Never negative.
+    pub offset: Point<Pixels>,
+    /// The visible text area.
+    pub viewport: gpui::Size<Pixels>,
+    /// Everything there is to scroll through.
+    pub content: gpui::Size<Pixels>,
+    pub line_height: Pixels,
+    /// The line numbers' width: where the text starts.
+    pub gutter_width: Pixels,
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -437,6 +455,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
     pub(super) soft_wrap: bool,
+    /// HERDR: false draws no scrollbars, like Zed's `scrollbar.show: never`.
+    pub(super) scrollbars: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
     pub(super) cursor_surrounding_lines: Option<usize>,
@@ -463,6 +483,9 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The text bounds
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     pub(super) last_selected_range: Option<CursorSelection>,
+    /// HERDR: what `Scroll` and `SelectionChange` last reported.
+    pub(super) reported_scroll: Option<Point<Pixels>>,
+    pub(super) reported_selection: Option<Range<usize>>,
     pub(super) selecting: bool,
     /// Anchor point of an in-progress columnar (block) selection.
     pub(super) column_select_start: Option<ColumnarPoint>,
@@ -679,7 +702,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// thumb inside every text field, which is a control the field does not
     /// have.
     pub(crate) fn shows_scrollbar(&self) -> bool {
-        self.is_multi_line()
+        self.is_multi_line() && self.scrollbars
     }
 
     pub fn is_multi_line(&self) -> bool {
@@ -812,6 +835,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             searchable: false,
             replaceable: true,
             soft_wrap: true,
+            scrollbars: true,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
             cursor_surrounding_lines: None,
@@ -852,6 +876,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             prepaint_caret_geometry: None,
             last_bounds: None,
             last_selected_range: None,
+            reported_scroll: None,
+            reported_selection: None,
             column_select_start: None,
             last_cursor: None,
             scroll_handle: ScrollHandle::new(),
@@ -1401,6 +1427,40 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.move_to(offset, None, cx);
         self.update_preferred_column();
         self.focus(window, cx);
+    }
+
+    /// HERDR: moves the caret to a (0-based) [`Position`] without taking the keyboard.
+    pub fn move_cursor_to(&mut self, position: impl Into<Position>, cx: &mut Context<Self>) {
+        let position: Position = position.into();
+        let offset = self.text.position_to_offset(&position);
+        self.move_to(offset, None, cx);
+        self.update_preferred_column();
+    }
+
+    /// HERDR: where the view is, once it has been laid out.
+    pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let layout = self.last_layout.as_ref()?;
+        let offset = self.scroll_handle.offset();
+        Some(ScrollMetrics {
+            offset: point(-offset.x, -offset.y),
+            viewport: self.input_bounds.size,
+            content: self.scroll_size,
+            line_height: layout.line_height,
+            gutter_width: layout.line_number_width,
+        })
+    }
+
+    /// HERDR: scrolls so the view starts `offset` right and down, kept within the content.
+    /// Unlike [`Self::set_scroll_offset`] it applies now, so a script drawing beside the text
+    /// reads the new place in the same frame. Before the first layout it waits for one.
+    pub fn scroll_view_to(&mut self, offset: Point<Pixels>, cx: &mut Context<Self>) {
+        let offset = point(-offset.x.max(px(0.)), -offset.y.max(px(0.)));
+        if self.last_layout.is_none() {
+            self.deferred_scroll_offset = Some(offset);
+            cx.notify();
+        } else {
+            self.update_scroll_offset(Some(offset), cx);
+        }
     }
 
     /// Focus the input field.
@@ -11070,6 +11130,12 @@ impl<M: crate::input::MultiLineMode> InputBaseState<M> {
     pub fn set_searchable(&mut self, searchable: bool, cx: &mut Context<Self>) {
         self.searchable = searchable;
         cx.notify();
+    }
+
+    /// HERDR: whether a multi-line input draws scrollbars, default is true.
+    pub fn scrollbars(mut self, show: bool) -> Self {
+        self.scrollbars = show;
+        self
     }
 
     /// Set the soft wrap mode, default is true.
