@@ -140,21 +140,51 @@ impl InputEditorStyle {
         let or = |value: Hsla, fallback: Hsla| if unset(value) { fallback } else { value };
 
         let foreground = or(self.foreground, colors.foreground);
+        let background = or(self.background, colors.surface);
         let mut selection = self.selection;
         if unset(selection) {
             selection = colors.accent;
             // A selection must not hide the glyphs it selects.
             selection.a = 0.4;
         }
+        // Zed One Dark / One Light `error`, `warning`, `info` and `hint`.
+        // Left unset, both severities painted the same invisible underline.
+        let diagnostics = if unset(self.diagnostics.error) {
+            zed_status(background.l < 0.5)
+        } else {
+            self.diagnostics
+        };
 
         Self {
             foreground,
             muted_foreground: or(self.muted_foreground, colors.muted_foreground),
-            background: or(self.background, colors.surface),
+            background,
             border: or(self.border, colors.border),
             selection,
             caret: or(self.caret, foreground),
+            diagnostics,
             ..self.clone()
+        }
+    }
+}
+
+/// Zed's status colors for the two One themes. The editor's squiggle uses these
+/// so an error and a warning are the same two colors Zed draws.
+fn zed_status(dark: bool) -> DiagnosticColors {
+    let color = |hex| Hsla::from(gpui::rgb(hex));
+    if dark {
+        DiagnosticColors {
+            error: color(0xd07277),
+            warning: color(0xdec184),
+            info: color(0x74ade8),
+            hint: color(0x788ca6),
+        }
+    } else {
+        DiagnosticColors {
+            error: color(0xd36151),
+            warning: color(0xa48819),
+            info: color(0x5c78e2),
+            hint: color(0x7274a7),
         }
     }
 }
@@ -253,5 +283,27 @@ mod tests {
 
         assert_ne!(first.foreground, second.foreground);
         assert_eq!(second.foreground, light.colors.foreground);
+    }
+
+    #[test]
+    fn diagnostics_take_zed_one_status_colors() {
+        let dark = InputEditorStyle::default().resolved(&dark());
+        let light = InputEditorStyle::default().resolved(&SemanticThemeTokens::default());
+        // One Dark error is red, warning is gold. They are not the same color.
+        assert!(dark.diagnostics.error.a > 0.9);
+        assert!(dark.diagnostics.warning.a > 0.9);
+        assert!(
+            (dark.diagnostics.error.h - dark.diagnostics.warning.h).abs() > 0.05
+                || (dark.diagnostics.error.l - dark.diagnostics.warning.l).abs() > 0.05
+        );
+        assert!((dark.diagnostics.error.h - light.diagnostics.error.h).abs() > 0.001
+            || (dark.diagnostics.error.l - light.diagnostics.error.l).abs() > 0.02);
+        // A color the editor already chose is left alone.
+        let chosen = hsla(0.1, 0.2, 0.3, 1.0);
+        let style = InputEditorStyle {
+            diagnostics: super::DiagnosticColors { error: chosen, ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(style.resolved(&dark()).diagnostics.error, chosen);
     }
 }

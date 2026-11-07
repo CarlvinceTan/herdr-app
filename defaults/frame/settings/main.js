@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, setShared, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -128,6 +128,21 @@ export default class Settings extends View {
 
   close() {
     closeOverlay(props().overlay);
+  }
+
+  // A pane follows its own switch. Until that is set, both follow Compact.
+  compactChoice(person, key) {
+    if (key in person) return Boolean(person[key]);
+    const saved = shared("panels.compact");
+    if (saved && typeof saved[key] === "boolean") return saved[key];
+    return Boolean(person.compact_panels);
+  }
+
+  setCompact(key, cx) {
+    const on = !this.compactChoice(this.person, key);
+    const saved = { ...(shared("panels.compact") ?? {}), [key]: on };
+    setShared("panels.compact", saved);
+    this.change((q) => { q[key] = on; }, cx);
   }
 
   // Pieces ---------------------------------------------------------------
@@ -516,19 +531,10 @@ export default class Settings extends View {
     return v_flex()
       .w_full()
       .child(this.heading(t, "Usage and Resources"))
-      .child(
-        this.row(
-          t,
-          "Compact",
-          "Rings instead of bars, graphs and lists. Credits keep their amounts.",
-          this.toggle(t, "st-compact-panels", Boolean(p.compact_panels), (_e, cx) =>
-            this.change((q) => {
-              if (q.compact_panels) delete q.compact_panels;
-              else q.compact_panels = true;
-            }, cx),
-          ),
-        ),
-      )
+      .child(this.row(t, "Compact usage", "Icons and what's left of the tightest window, instead of bars.",
+        this.toggle(t, "st-compact-usage", this.compactChoice(p, "compact_usage"), (_e, cx) => this.setCompact("compact_usage", cx))))
+      .child(this.row(t, "Compact resources", "Rings instead of graphs and lists.",
+        this.toggle(t, "st-compact-resources", this.compactChoice(p, "compact_resources"), (_e, cx) => this.setCompact("compact_resources", cx))))
       .child(
         this.row(
           t,

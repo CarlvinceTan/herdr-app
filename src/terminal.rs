@@ -17,14 +17,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-fn pad(over: Option<[f32; 2]>) -> (f32, f32) {
+pub(crate) fn pad(over: Option<[f32; 2]>) -> (f32, f32) {
     let p = over.unwrap_or(crate::settings::get().terminal_padding);
     let zoom = crate::settings::zoom();
     (p[0] * zoom, p[1] * zoom)
 }
 
-pub(crate) fn grid_size(bounds: Size<Pixels>, cell: Size<Pixels>) -> (u16, u16) {
-    let (px_, py_) = pad(None);
+pub(crate) fn grid_size(bounds: Size<Pixels>, cell: Size<Pixels>, (px_, py_): (f32, f32)) -> (u16, u16) {
     let cols = ((f32::from(bounds.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
     let rows = ((f32::from(bounds.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
     (cols, rows)
@@ -2051,7 +2050,7 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, window, _cx| {
-                        let (cols, rows) = grid_size(bounds.size, cell);
+                        let (cols, rows) = grid_size(bounds.size, cell, pad);
                         grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
                     },
                     move |bounds, _, window, cx| {
@@ -3572,6 +3571,15 @@ mod tests {
     fn a_grid_without_top_padding_starts_at_the_top() {
         assert_eq!(super::spare_above(0.0, 9.0), 0.0);
         assert_eq!(super::spare_above(6.0, 9.0), 4.0);
+    }
+
+    #[test]
+    fn grid_size_uses_the_painted_padding() {
+        let bounds = gpui::size(gpui::px(800.0), gpui::px(600.0));
+        let cell = gpui::size(gpui::px(8.0), gpui::px(20.0));
+        assert_eq!(super::grid_size(bounds, cell, (0.0, 0.0)), (100, 30));
+        assert_eq!(super::grid_size(bounds, cell, (14.0, 12.0)), (96, 28));
+        assert_eq!(super::grid_size(bounds, cell, (20.0, 5.0)), (95, 29));
     }
 
     #[test]

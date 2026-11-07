@@ -371,8 +371,15 @@ pub struct Person {
     pub zoom: f32,
     pub sounds: Sounds,
     /// Show Usage and Resources as compact grids of rings.
+    /// Each pane can override this with `compact_usage` or `compact_resources`.
     #[serde(skip_serializing_if = "is_false")]
     pub compact_panels: bool,
+    /// Usage as icons and what's left. Unset: follow `compact_panels`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_usage: Option<bool>,
+    /// Resources as rings. Unset: follow `compact_panels`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_resources: Option<bool>,
     /// Put Usage and Resources in one pane, Usage first.
     #[serde(skip_serializing_if = "is_false")]
     pub merge_panels: bool,
@@ -466,6 +473,8 @@ impl Default for Person {
             zoom: 1.0,
             sounds: Sounds::default(),
             compact_panels: false,
+            compact_usage: None,
+            compact_resources: None,
             merge_panels: false,
             machine_order: Vec::new(),
             core: None,
@@ -518,6 +527,10 @@ pub struct Settings {
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
     pub compact_panels: bool,
+    /// Usage drawn as icons and what's left of the tightest window.
+    pub compact_usage: bool,
+    /// Resources drawn as rings instead of graphs and lists.
+    pub compact_resources: bool,
     pub merge_panels: bool,
     pub machine_order: Vec<String>,
 }
@@ -563,6 +576,8 @@ impl Default for Settings {
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
             compact_panels: false,
+            compact_usage: false,
+            compact_resources: false,
             merge_panels: false,
             machine_order: Vec::new(),
         }
@@ -604,6 +619,8 @@ impl Settings {
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
             compact_panels: person.compact_panels,
+            compact_usage: person.compact_usage.unwrap_or(person.compact_panels),
+            compact_resources: person.compact_resources.unwrap_or(person.compact_panels),
             merge_panels: person.merge_panels,
             machine_order: person.machine_order.clone(),
         }

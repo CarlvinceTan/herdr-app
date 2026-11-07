@@ -373,8 +373,9 @@ The tab block says how each pane of the shown tab is wrapped:
             "lone": false } }
 ```
 
-- The look applies to every pane; `focus` replaces the border while the
-  pane has the keyboard; `gap` is the space between panes.
+- The look applies to every pane; `focus` replaces the border on the focused
+  pane, or the zoomed pane of a split tab. A tab's only pane keeps `border`;
+  `gap` is the space between panes.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed) and its
@@ -639,11 +640,15 @@ The main ones:
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`.
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 - Web pages (macOS, this fork's Chromium): a mod draws one with `WebView.new(id)`;
+  downloads ask where to save the file using a Save As dialog.
   `web.do {id, op, arg?}` drives it (op: `navigate` with an address or a search,
   `back`, `forward`, `reload`, `zoom` with `in`/`out`/`reset`, `clear-data`,
   `hole` with `"x y w h"` to let clicks through, `css` with style text (a page's
   own touches, kept in one style element), `preload` with an address (start a page
-  before its pane draws), `show`, `hide`, `remove`).
+  before its pane draws), `show`, `hide`, `remove`). A page scales with its
+  pane's width, like a picture (bigger pane, bigger text), and stops at a
+  readable size in small panes, where it reflows instead. `zoom in`/`out` step
+  on top of that; `zoom reset` returns to the pane's own scaling.
   `web.report` publishes each page's `{url, title, asked, shown}` to the shared
   `web.pages`; `web.clicked {id}` is what a press on a page sends, and focuses
   the pane that holds it; `page.fullscreen {id, on?}` shows a page across the
@@ -689,8 +694,10 @@ What's about the user, never a look:
   goes there when clicked. `done` / `blocked` replace the bundled MP3s
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
-- `compact_panels`: show Usage and Resources as compact grids of rings
-  instead of bars, graphs and lists. Settings > Panels has the switch.
+- `compact_panels`: the compact choice for Usage and Resources when a pane
+  has no choice of its own. Settings > Panels has a switch for each pane.
+- `compact_usage`: Usage as icons and what's left. Unset follows `compact_panels`.
+- `compact_resources`: Resources as rings. Unset follows `compact_panels`.
 - `merge_panels`: put Usage and Resources in one pane titled Resources,
   with Usage first. Settings > Panels has the switch.
 - `machine_order`: the machines' order in the sidebar and the resource
@@ -784,8 +791,11 @@ What's about the user, never a look:
 ## Programs: `programs.json`
 
 Every pane, agent and terminal carries `program`: its name, icon and tile,
-from one table, so every mod shows the same. An agent's own report wins;
-else the program the terminal runs (an interpreter shows what it runs:
+from one table, so every mod shows the same. An agent's own report wins
+while that agent is still what runs there (a shell can be, while it keeps
+reporting). A different agent in front wins over a report the previous one
+left behind; a tool it launched does not. Otherwise the program the terminal
+runs (an interpreter shows what it runs:
 `node .../vite` is Vite, `npx vitest` is Vitest); shells are `shell`,
 anything unlisted is `program` with a color of its own. The built-in table
 has 120 programs (agents, editors, runtimes, tools, databases, infra);

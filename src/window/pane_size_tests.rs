@@ -105,6 +105,7 @@ fn hidden_tabs_follow(cx: &mut gpui::TestAppContext) {
         this.sync(window, cx);
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.update(cx, |this, cx| this.terms["a"].view.update(cx, |term, _| term.program_padding = Some([0.0, 0.0])));
     let dims = |cx: &mut gpui::VisualTestContext| view.update(cx, |this, cx| ["a", "a2"].map(|p| this.terms[p].view.read(cx).dimensions()));
     let before = dims(cx);
     cx.simulate_resize(size(px(1400.0), px(900.0)));
@@ -116,6 +117,17 @@ fn hidden_tabs_follow(cx: &mut gpui::TestAppContext) {
     let fitted = dims(cx);
     eprintln!("hidden tab: {before:?} before the window grew, {fitted:?} once it settled");
     assert_ne!(fitted, before, "a settled window must size the hidden tab's terminals");
+    // Changing a hidden terminal's padding must invalidate the cached fit.
+    view.update(cx, |this, cx| this.terms["a2"].view.update(cx, |term, _| term.program_padding = Some([35.0, 25.0])));
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    let fitted_with_override = dims(cx);
+    assert_ne!(fitted_with_override[1], fitted[1], "a padding change must resize the hidden grid");
+    // Returning to the shell restores the layout padding even without a window resize.
+    view.update(cx, |this, cx| this.terms["a2"].view.update(cx, |term, _| term.program_padding = None));
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    assert_eq!(dims(cx), fitted, "leaving a program must restore the layout-sized grid");
     // Shown, the panes draw with the size they were given: nothing changes.
     view.update_in(cx, |this, window, cx| {
         this.model.select_tab("ta");

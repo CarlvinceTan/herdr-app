@@ -115,8 +115,8 @@ fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFram
     }
 }
 
-/// The tab area and the cell size.
-type Geometry = (Size<Pixels>, Size<Pixels>);
+/// The tab area, cell size, and each hidden terminal's effective padding.
+type Geometry = (Size<Pixels>, Size<Pixels>, Vec<(String, (f32, f32))>);
 
 /// Whether hidden tabs fit the window: the geometry seen at the last tick, and
 /// whether they were sized for it.
@@ -131,17 +131,17 @@ pub(super) enum HiddenFit {
 impl AppWindow {
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = root.path_to(pane)?.into_iter().collect();
-        self.displayed_size(root, root.panes().len(), pane, &focused, window)
+        self.displayed_size(root, root.panes().len(), pane, &focused, window, crate::terminal::pad(None))
     }
 
     /// The grid `pane` gets when `tab` is the one shown.
-    pub(super) fn shown_size(&self, tab: &Tab, pane: &str, window: &Window) -> Option<(u16, u16)> {
+    pub(super) fn shown_size(&self, tab: &Tab, pane: &str, window: &Window, padding: (f32, f32)) -> Option<(u16, u16)> {
         let focused = tab.focused_pane().and_then(|f| tab.root.path_to(&f)).unwrap_or_default().into_iter().collect();
-        self.displayed_size(tab.shown(), tab.root.panes().len(), pane, &focused, window)
+        self.displayed_size(tab.shown(), tab.root.panes().len(), pane, &focused, window, padding)
     }
 
     /// `shown`: the tree on screen; `panes`: how many the tab has (its frame needs more than one, or `lone`).
-    fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
+    fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window, terminal_padding: (f32, f32)) -> Option<(u16, u16)> {
         let (context, area) = self.context_area()?;
         let frame = match context.content() {
             Some(Content::Context { pane: Some(frame), .. }) if frame.lone || panes > 1 => Some(frame),
@@ -152,7 +152,7 @@ impl AppWindow {
         let (y, x) = padding(context);
         let size = inset(area, 2.0 * x * zoom, 2.0 * y * zoom);
         let size = pane_size(shown, size, pane, frame, focused, zoom)?;
-        Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window)))
+        Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window), terminal_padding))
     }
 
     /// The block tabs show in, and the area it was last drawn with.
@@ -169,21 +169,25 @@ impl AppWindow {
     pub(super) fn fit_hidden_tabs(&mut self, window: &Window, cx: &App) {
         let Some((_, area)) = self.context_area() else { return };
         let cell = crate::terminal::cell_size(window);
-        let now = (area, cell);
-        match self.hidden_fit {
-            HiddenFit::Done(g) if g == now => return,
-            HiddenFit::Seen(g) if g == now => self.hidden_fit = HiddenFit::Done(now),
+        let active = self.model.active_tab().map(|t| t.id.clone());
+        let paddings = self.model.tabs().filter(|t| Some(&t.id) != active.as_ref())
+            .flat_map(|tab| tab.shown().panes())
+            .filter_map(|pane| self.terms.get(&pane.id).map(|t| (pane.id.clone(), crate::terminal::pad(t.view.read(cx).program_padding))))
+            .collect();
+        let now = (area, cell, paddings);
+        match &self.hidden_fit {
+            HiddenFit::Done(g) if *g == now => return,
+            HiddenFit::Seen(g) if *g == now => self.hidden_fit = HiddenFit::Done(now),
             _ => {
                 self.hidden_fit = HiddenFit::Seen(now);
                 return;
             }
         }
         let scale = window.scale_factor();
-        let active = self.model.active_tab().map(|t| t.id.clone());
         for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref()) {
             for pane in tab.shown().panes() {
                 if let Some(t) = self.terms.get(&pane.id)
-                    && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window)
+                    && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window, crate::terminal::pad(t.view.read(cx).program_padding))
                 {
                     t.view.read(cx).fit(cols, rows, cell, scale);
                 }

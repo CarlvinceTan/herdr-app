@@ -2193,10 +2193,13 @@ impl AppWindow {
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
             // A report outlives its process (OpenCode back at its shell still says
-            // idle): once the core names a shell in front, it isn't an agent.
+            // idle, and still says idle after Cursor's `agent` replaced it). A shell
+            // in front is not that agent. A different agent in front doesn't report,
+            // so the tab would stay idle: it is working until it says otherwise.
             let shell = shell_in_front(rec);
-            let word = if shell { None } else { rec.get("status").and_then(Value::as_str).map(str::to_owned) };
-            let app = if shell { None } else { rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned) };
+            let replaced = different_program_in_front(rec);
+            let word = shown_activity(shell, replaced, rec.get("status").and_then(Value::as_str));
+            let app = if shell || replaced { None } else { rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned) };
             let looking = visible.contains(addr) && self.window_active;
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
@@ -4240,9 +4243,8 @@ impl AppWindow {
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        // A tab's only pane is focused by being the only one: its border stays the plain one,
-        // so closing the other pane can't show a focus ring that the terminal view then covers.
-        let on = on && self.model.active_tab().is_some_and(|c| c.root.panes().len() > 1);
+        // A zoomed pane still belongs to a split tab, even when it is the only one shown.
+        let on = pane_frame_focused(self.model.active_tab(), &n.id, on);
         let line = pane_size::frame_border(f, on);
         let group = SharedString::from(format!("pane-{}", n.id));
         let mut el = div().size_full().relative().flex().flex_col().overflow_hidden().group(group.clone());
@@ -4920,6 +4922,10 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
     chrome.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some())
 }
 
+fn pane_frame_focused(tab: Option<&Tab>, pane: &str, focused: bool) -> bool {
+    tab.is_some_and(|tab| tab.root.panes().len() > 1 && (focused || tab.zoomed.as_deref() == Some(pane)))
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
@@ -5096,19 +5102,55 @@ fn adoptable(record: &Value, space: &str, tab: Option<&str>, machine: Option<&st
 }
 
 fn program_of(report: &Value, argv: Option<&Value>) -> Value {
-    let app = report.get("app").and_then(Value::as_str);
+    let app = report.get("app").and_then(Value::as_str).filter(|s| !s.is_empty());
     let state = report.get("state").and_then(Value::as_str);
     let argv: Vec<String> = argv.and_then(Value::as_array).into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect();
-    // An agent's report outlives its process: once a shell is in front again,
-    // show the shell, not the agent that started it (unless it's still active).
+    // An agent's report outlives its process. A shell in front is that agent
+    // only while it is still reporting; a different agent in front replaced it
+    // (OpenCode left idle, then Cursor's `agent` started). A tool the agent
+    // itself launched is not another agent, so the report keeps the icon.
     let running = crate::programs::of(None, &argv);
-    if app.is_some() && running["key"].as_str() == Some("shell") {
-        if state == Some("working") || state == Some("blocked") || state == Some("idle") {
-            return crate::programs::of(app, &argv);
+    let running_key = running["key"].as_str().unwrap_or("").to_owned();
+    if let Some(app) = app {
+        let reported_key = crate::programs::of(Some(app), &[])["key"].as_str().unwrap_or("").to_owned();
+        if running_key == "shell" {
+            if state == Some("working") || state == Some("blocked") || state == Some("idle") {
+                return crate::programs::of(Some(app), &argv);
+            }
+            return running;
         }
-        return running;
+        if running_key != reported_key && crate::programs::launches(&running_key) {
+            return running;
+        }
+        return crate::programs::of(Some(app), &argv);
     }
-    crate::programs::of(app, &argv)
+    running
+}
+
+/// What a pane and its tab should say. A shell in front is not an agent. A
+/// different agent that never reports still counts as working: the idle report
+/// the last one left must not hide it.
+fn shown_activity(shell: bool, replaced: bool, reported: Option<&str>) -> Option<String> {
+    if shell {
+        None
+    } else if replaced {
+        Some("working".to_owned())
+    } else {
+        reported.filter(|s| !s.is_empty()).map(str::to_owned)
+    }
+}
+
+/// The foreground process is a different agent than the one that last reported.
+/// The core keeps that report until something else sends one.
+fn different_program_in_front(rec: &Value) -> bool {
+    let Some(argv) = rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())) else {
+        return false;
+    };
+    let report = rec.get("report").unwrap_or(&Value::Null);
+    let Some(app) = report.get("app").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return false };
+    let shown = program_of(report, Some(argv))["key"].as_str().map(str::to_owned);
+    let reported = crate::programs::of(Some(app), &[])["key"].as_str().map(str::to_owned);
+    shown != reported
 }
 
 fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
@@ -5361,6 +5403,30 @@ mod tests {
             let report = json!({ "app": "opencode", "state": state });
             assert_eq!(super::program_of(&report, Some(&json!(["/bin/zsh", "-l"])))["key"], "opencode", "{state}");
         }
+    }
+
+    #[test]
+    fn a_different_agent_in_front_is_working_and_a_shell_is_not() {
+        assert_eq!(super::shown_activity(false, true, Some("idle")).as_deref(), Some("working"));
+        assert_eq!(super::shown_activity(true, true, Some("idle")), None);
+        assert_eq!(super::shown_activity(false, false, Some("idle")).as_deref(), Some("idle"));
+        assert_eq!(super::shown_activity(false, false, Some("working")).as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn a_different_agent_replaces_the_report_the_last_one_left() {
+        let report = json!({ "app": "opencode", "state": "idle" });
+        let cursor = json!(["/Users/x/.local/bin/agent", "/Users/x/.local/share/cursor-agent/versions/x/index.js"]);
+        assert_eq!(super::program_of(&report, Some(&cursor))["key"], "cursor");
+        assert_eq!(super::program_of(&report, Some(&cursor))["icon"], "icons/cursor.svg");
+        // A tool the agent launched is not a new agent: the report keeps the icon.
+        let working = json!({ "app": "opencode", "state": "working" });
+        assert_eq!(super::program_of(&working, Some(&json!(["npm", "test"])))["key"], "opencode");
+        assert_eq!(super::program_of(&working, Some(&json!(["vim"])))["key"], "opencode");
+        let rec = json!({ "foreground": { "argv": cursor }, "report": report });
+        assert!(super::different_program_in_front(&rec));
+        assert!(!super::shell_in_front(&rec));
+        assert!(!super::different_program_in_front(&json!({ "foreground": { "argv": ["npm", "test"] }, "report": working })));
     }
 
     #[test]
@@ -5723,6 +5789,60 @@ mod tests {
     #[test]
     fn pane_ring_follows_keyboard_focus() {
         in_own_process("pane_ring_focus");
+    }
+
+    #[test]
+    fn expanded_pane_ring_uses_the_whole_tab() {
+        let mut tab = crate::model::Tab::new("tab", "", "p1", "t1");
+        assert!(!super::pane_frame_focused(Some(&tab), "p1", true));
+        let mut model = crate::model::Model::default();
+        model.add_space("space", "", "/tmp", tab);
+        model.split("p1", crate::layout::Axis::Row, "p2", "t2");
+        tab = model.active_tab().unwrap().clone();
+        assert!(super::pane_frame_focused(Some(&tab), "p2", true));
+        assert!(!super::pane_frame_focused(Some(&tab), "p1", false));
+        tab.zoomed = Some("p2".into());
+        assert!(super::pane_frame_focused(Some(&tab), "p2", false));
+        assert!(!super::pane_frame_focused(Some(&tab), "p1", false));
+        tab.root = crate::model::pane("p2", "t2");
+        assert!(!super::pane_frame_focused(Some(&tab), "p2", true));
+        assert!(!super::pane_frame_focused(None, "p2", true));
+    }
+
+    #[test]
+    fn zoomed_pane_keeps_its_focus_ring() {
+        in_own_process("zoomed_pane_ring");
+    }
+
+    #[gpui::test]
+    fn zoomed_pane_ring(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("zoomed_pane_ring") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active", "pane": {
+                "lone": true, "border": { "width": 1, "color": "border" },
+                "focus": { "width": 1, "color": "accent" }
+            } }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.split("p1", crate::layout::Axis::Row, "p2", "t2");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let check = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| {
+            let this = view.read(cx);
+            let frame = this.pane_frame().unwrap();
+            let focused = this.focused_path(window, cx).contains("p2");
+            let on = super::pane_frame_focused(this.model.active_tab(), "p2", focused);
+            assert_eq!(super::pane_size::frame_border(frame, on).unwrap().color, "accent");
+        });
+        check(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| { this.run("pane.zoom", json!({"pane": "p2"}), window, cx); }));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        check(cx);
     }
 
     #[gpui::test]

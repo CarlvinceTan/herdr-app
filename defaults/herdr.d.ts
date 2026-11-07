@@ -137,9 +137,10 @@ export function machines(): { name: string | null; layout: "loading" | "ready" |
 export function spaces(): SpaceInfo[];
 
 /** How a terminal shows, from the app's program table (programs.json): the agent's own
- *  report, else the program it runs. Draw `icon` with `svg(icon)` in a color when `tint`
- *  (a one-color glyph), else `image(icon)`. `tile` / `color`: a colored tile with the glyph
- *  on it, for layouts that want one. */
+ *  report while that agent is still what runs there, else the program it runs. A different
+ *  agent in front wins over a report the previous one left behind. Draw `icon` with
+ *  `svg(icon)` in a color when `tint` (a one-color glyph), else `image(icon)`. `tile` /
+ *  `color`: a colored tile with the glyph on it, for layouts that want one. */
 export interface Program {
   /** The table's key, e.g. "claude", "nvim", "shell", "program" (not listed), "agent". */
   key: string;

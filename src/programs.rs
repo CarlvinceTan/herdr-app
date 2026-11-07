@@ -208,6 +208,11 @@ pub fn terminal_padding(key: &str) -> Option<[f32; 2]> {
     TABLE.with(|t| t.borrow().programs.get(key).and_then(|e| e.terminal_padding))
 }
 
+/// Whether `key` is an agent people can start (its entry has `run`).
+pub fn launches(key: &str) -> bool {
+    TABLE.with(|t| t.borrow().programs.get(key).is_some_and(|e| !e.run.is_empty()))
+}
+
 /// How to start the agent `key` again where it was: its conversation `id` when
 /// it said which, else its last one in that folder, else a fresh start.
 pub fn resume(key: &str, id: Option<&str>) -> Option<Vec<String>> {
@@ -296,6 +301,35 @@ fn powershell_words(line: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+/// The program a generic `agent` launcher actually starts: the first argument
+/// that isn't a flag, recognized by its file name or a directory on its path
+/// (`…/cursor-agent/…/index.js`). Later arguments are the person's own.
+fn launched<'a>(t: &'a Table, argv: &[String]) -> Option<(&'a str, &'a Entry)> {
+    let script = argv.iter().skip(1).find(|a| !a.starts_with('-'))?;
+    let mut parts: Vec<&str> = script.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let file = parts.pop()?;
+    let stem = [".js", ".mjs", ".cjs", ".ts", ".py", ".rb"].iter().find_map(|x| base(file).strip_suffix(x)).unwrap_or_else(|| base(file));
+    if let Some(found) = specific(t, stem) {
+        return Some(found);
+    }
+    while let Some(part) = parts.pop() {
+        if let Some(found) = specific(t, base(part)) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// A table entry named by a path piece, never the generic fallbacks.
+fn specific<'a>(t: &'a Table, name: &str) -> Option<(&'a str, &'a Entry)> {
+    let (key, entry) = find(t, name)?;
+    if matches!(key, "agent" | "shell" | "program") || t.interpreters.iter().any(|i| i == key) {
+        None
+    } else {
+        Some((key, entry))
+    }
+}
+
 fn find<'a>(t: &'a Table, name: &str) -> Option<(&'a str, &'a Entry)> {
     let lower = name.to_lowercase();
     t.programs
@@ -333,6 +367,14 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
     let Some(first) = argv.first().map(|a| base(a)) else {
         return shown("shell", t.programs.get("shell").unwrap_or(&Entry::default()), None, true, false);
     };
+    // Cursor's CLI is installed as `agent` and re-execs node with that argv0
+    // (`exec -a`). The script it runs lives under `cursor-agent`. The generic
+    // `agent` entry is an unknown reported app, not this launcher.
+    if first == "agent"
+        && let Some((key, e)) = launched(t, argv)
+    {
+        return shown(key, e, None, false, false);
+    }
     // `node .../vite.js dev`, `npx vite`, `uv run pytest`: the program they run, when it's known.
     if t.interpreters.iter().any(|i| i == first) {
         for arg in argv[1..].iter().filter(|a| !a.starts_with('-')) {
@@ -430,6 +472,14 @@ mod tests {
         assert_eq!(key(None, &["uv", "run", "pytest"]), "pytest");
         assert_eq!(key(None, &["mytool"]), "program");
         assert_eq!(key(None, &["/bin/zsh", "-ic", "\"$@\"; exec \"$0\" -i", "/bin/zsh", "vi", "x"]), "vim");
+        // Cursor's `agent` launcher: argv0 is the symlink, the script names the program.
+        assert_eq!(
+            key(None, &["/Users/x/.local/bin/agent", "--use-system-ca", "/Users/x/.local/share/cursor-agent/versions/x/index.js"]),
+            "cursor"
+        );
+        assert_eq!(key(None, &["agent", r"C:\Users\x\cursor-agent\index.js"]), "cursor");
+        assert_eq!(key(None, &["agent"]), "agent");
+        assert_eq!(key(None, &["cursor-agent"]), "cursor");
         assert_eq!(key(None, &["/usr/bin/fish", "-ic", "command $argv[2..]; exec $argv[1] -i", "/usr/bin/fish", "vi", "x"]), "vim");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");

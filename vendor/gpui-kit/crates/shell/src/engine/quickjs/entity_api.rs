@@ -497,6 +497,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
+    let focus_editor = runtime.clone();
+    globals.set(
+        "__editor_focus",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_editor(&ctx, &focus_editor, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.focus(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "focus()"))
+        }),
+    )?;
+
     let subscribe_editor = runtime.clone();
     globals.set(
         "__editor_on",
