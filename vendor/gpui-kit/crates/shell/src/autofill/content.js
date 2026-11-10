@@ -383,7 +383,9 @@
   async function checkOffer() {
     if (offer || window !== window.top) return;
     const pending = await ask({ type: "pending" });
-    if (pending && "username" in pending) showOffer(pending);
+    // Clicking a submit button notices the login twice (its click, then the form's submit), so two
+    // checks can be in flight at once: only the first to come back may show the offer.
+    if (pending && "username" in pending && !offer) showOffer(pending);
   }
 
   // The offer: what was typed, in fields that can be corrected before saving.
@@ -432,24 +434,35 @@
     box.append(close, make("div", { className: "title", textContent: pending.update ? "Update the saved password?" : "Save this password?" }),
       make("div", { className: "site", textContent: location.hostname }), field("Username", user), field("Password", pass, show), actions);
     root.append(style, box);
+    // One offer at a time: a repeated notice replaces the one on screen rather than stacking a
+    // second copy over it (whose buttons would then have nothing left to close).
+    if (offer) {
+      clearTimeout(offer.timer);
+      offer.host.remove();
+    }
     document.documentElement.append(host);
     offer = { host, timer: null };
     const away = (dismiss = true) => {
-      if (!offer || offer.host !== host) return;
-      clearTimeout(offer.timer);
+      const current = offer?.host === host;
+      if (current) {
+        clearTimeout(offer.timer);
+        offer = null;
+      }
+      // This host goes even if a newer offer took over, so an old toast is never stuck on screen.
       box.style.opacity = "0";
       setTimeout(() => host.remove(), 250);
-      offer = null;
-      if (dismiss) ask({ type: "dismiss" });
+      if (dismiss && current) ask({ type: "dismiss" });
     };
     // It fades by itself, but not while the pointer is on it or a field is being edited.
     const soon = () => {
-      clearTimeout(offer?.timer);
-      if (offer && !box.matches(":hover") && !root.activeElement) offer.timer = setTimeout(() => away(), OFFER_SHOWN);
+      if (offer?.host !== host) return;
+      clearTimeout(offer.timer);
+      if (!box.matches(":hover") && !root.activeElement) offer.timer = setTimeout(() => away(), OFFER_SHOWN);
     };
-    box.addEventListener("mouseenter", () => clearTimeout(offer?.timer));
+    const hold = () => { if (offer?.host === host) clearTimeout(offer.timer); };
+    box.addEventListener("mouseenter", hold);
     box.addEventListener("mouseleave", soon);
-    box.addEventListener("focusin", () => clearTimeout(offer?.timer));
+    box.addEventListener("focusin", hold);
     box.addEventListener("focusout", () => setTimeout(soon, 0));
     close.addEventListener("click", (e) => e.isTrusted && away());
     later.addEventListener("click", (e) => e.isTrusted && away());
@@ -459,7 +472,7 @@
       show.textContent = pass.type === "password" ? "Show" : "Hide";
     });
     const store = async () => {
-      clearTimeout(offer?.timer);
+      if (offer?.host === host) clearTimeout(offer.timer);
       save.disabled = later.disabled = true;
       const got = await ask({ type: "save", username: user.value.trim(), password: pass.value });
       const note = got?.saved ? (got.created ? "Saved to a new vault" : "Saved to your vault") : "Couldn\u2019t save it";
