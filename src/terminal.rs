@@ -4931,7 +4931,7 @@ mod tests {
     fn a_row_bleeds_its_most_common_background() {
         let cell = |bg| super::vt::Cell {
             text: String::new(), fg: super::Rgb(0, 0, 0), bg,
-            bold: false, italic: false, faint: false, underline: false, strike: false, wide: false,
+            bold: false, italic: false, faint: false, underline: None, underline_color: None, strike: false, wide: false,
         };
         assert_eq!(super::most_common_bg(&[cell(Some(super::Rgb(1, 1, 1))), cell(Some(super::Rgb(2, 2, 2))), cell(Some(super::Rgb(1, 1, 1)))]), Some(super::Rgb(1, 1, 1)));
         assert_eq!(super::most_common_bg(&[cell(None)]), None);
