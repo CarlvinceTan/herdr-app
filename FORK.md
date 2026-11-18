@@ -47,19 +47,26 @@ When Settings > Updates says upstream is newer:
 1. `git fetch upstream --tags`, then on `cef`: `git merge vX.Y.Z` (the release tag).
 2. Resolve conflicts, keeping both sides: upstream's change and this fork's additions above.
 3. If the merge changes the `cef` crate's version, the matching CEF distribution has to be in
-   `~/.local/share/cef` first. Agents can't download it here; give the person the command.
+   `~/.local/share/cef` first: `cargo install export-cef-dir --version '=<cef crate version>'`, then
+   `export-cef-dir --force ~/.local/share/cef`. Keep `cef-dll-sys` in Cargo.lock at the same CEF build
+   as `cef` (`cargo update -p cef-dll-sys --precise <version>`): a fresh lock picks a newer one.
 4. Build and try it on a scratch home before installing (it opens beside the real one):
    `cargo build --release && scripts/bundle-cef.sh release`, then run
-   `target/bundle/Herdr.app/Contents/MacOS/Herdr` with `HERDR_APP_HOME=~/.config/herdr-dev`,
-   `XDG_STATE_HOME=~/.local/state/herdr-dev` and the `HC_*` variables unset.
+   `target/bundle/Herdr.app/Contents/MacOS/Herdr` with `HERDR_APP_HOME=<short path>` (its socket path
+   has a length limit), `XDG_STATE_HOME=<another>`, `HERDR_BROWSER_STATE=<another>` (else Chromium shares
+   the installed app's profile and won't start), its own `HC_SESSION`, and `HC_TERMINAL_ID`/`HC_SOCKET`
+   unset. A hidden copy (`HERDR_BACKGROUND=1`) doesn't load media; check playback in a visible window.
 5. `scripts/install-fork.sh`: builds, replaces `/Applications/Herdr.app`, and reopens it.
    `HERDR_WHILE_CLOSED='<command>'` runs a command while Herdr is closed (for edits to files it
    rewrites while running, such as `shared.json`).
    Terminals and agents keep running; they live in herdr-core.
 6. Settings > Updates should now show the new version, with upstream up to date.
 
-`cargo test --release --bin herdr-app` should pass, except `fitted_popups_use_their_rendered_size_at_the_window_edge`,
-which also fails on upstream on macOS.
+`cargo test --bin herdr-app` should pass. In release (`--release`), five tests that read element bounds
+fail (`fitted_popups_…`, `popup_at_right_edge_snaps_inside` and three find-bar tests) and pass in debug.
+
+The fork's Chromium is a standard CEF build: it plays VP8/VP9/AV1, Opus, Vorbis, MP3 and FLAC, but not
+H.264, HEVC or AAC.
 
 ## Going back
 
