@@ -96,19 +96,19 @@ mod native {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use cef::{
-        App, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
+        App, BeforeDownloadCallback, Browser, BrowserProcessHandler, BrowserSettings, CefString, Client, CommandLine, DictionaryValue,
         Frame, ImplApp, ImplBrowser, ImplBrowserHost, ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplCookieManager, ImplFrame, ImplNavigationEntry,
         ImplLifeSpanHandler, ImplMediaAccessCallback, ImplPermissionHandler, ImplPostData, ImplPostDataElement, ImplRequest, ImplUrlrequestClient,
-        ContextMenuHandler, ContextMenuParams, DisplayHandler, LifeSpanHandler, LogSeverity, MediaAccessCallback, MenuModel, PermissionHandler,
+        ContextMenuHandler, ContextMenuParams, DisplayHandler, DownloadHandler, DownloadItem, ImplBeforeDownloadCallback, ImplDownloadHandler, LifeSpanHandler, LoadHandler, LogSeverity, MediaAccessCallback, MenuModel, PermissionHandler,
         PopupFeatures, Rect as CefRect, RequestContext, RequestContextHandler, RequestContextSettings, ResourceRequestHandler, ReturnValue,
         RuntimeStyle, Settings, V8Context,
         Callback, Request, Urlrequest, UrlrequestClient, WindowInfo, WindowOpenDisposition, WrapApp, WrapBrowserProcessHandler,
-        WrapClient, WrapContextMenuHandler, WrapDisplayHandler, WrapLifeSpanHandler, WrapPermissionHandler,
+        WrapClient, WrapContextMenuHandler, WrapDisplayHandler, WrapDownloadHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapPermissionHandler,
         WrapRenderProcessHandler, WrapRequestContextHandler, WrapResourceRequestHandler, WrapUrlrequestClient,
         rc::Rc as _, wrap_app, wrap_browser_process_handler, wrap_client, wrap_context_menu_handler,
-        wrap_display_handler, wrap_life_span_handler, wrap_permission_handler, wrap_render_process_handler,
+        wrap_display_handler, wrap_download_handler, wrap_life_span_handler, wrap_load_handler, wrap_permission_handler, wrap_render_process_handler,
         wrap_request_context_handler, wrap_resource_request_handler, wrap_urlrequest_client,
-        ImplDisplayHandler, ImplDictionaryValue, ImplRenderProcessHandler, ImplRequestContextHandler, ImplResourceRequestHandler, ImplV8Context, RenderProcessHandler,
+        ImplDisplayHandler, ImplDictionaryValue, ImplLoadHandler, ImplRenderProcessHandler, ImplRequestContextHandler, ImplResourceRequestHandler, ImplV8Context, RenderProcessHandler,
         EventFlags, ImplContextMenuHandler, ImplContextMenuParams, ImplMenuModel,
     };
     use gpui::{App as GpuiApp, Bounds, Pixels, Window};
@@ -155,6 +155,19 @@ mod native {
     // Web pages default to 16px text. This brings them to about Herdr's 13 to 14.
     const DEFAULT_ZOOM: f64 = 0.85;
     const ZOOMS: [f64; 11] = [0.5, 0.6, 0.7, 0.75, DEFAULT_ZOOM, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
+    /// A pane this wide shows pages at `DEFAULT_ZOOM`. Pages scale in proportion
+    /// to their pane's width, like a picture: the layout stays the same and the
+    /// text grows or shrinks with the pane. Width alone decides, since pages
+    /// scroll down, so a short pane doesn't shrink its text.
+    const ZOOM_REFERENCE_WIDTH: f64 = 1200.0;
+    /// Pages never scale below this, so text stays readable in small panes.
+    /// Below it the page reflows to fit instead.
+    const ZOOM_READABLE: f64 = 0.6;
+    /// Size zoom moves in these steps, so dragging a divider doesn't reflow the
+    /// page on every frame.
+    const ZOOM_SIZE_STEP: f64 = 0.025;
+    const ZOOM_MIN: f64 = 0.35;
+    const ZOOM_MAX: f64 = 2.0;
     const CORNER_RADIUS: f64 = 9.0;
     const HOLE_RADIUS: f64 = 8.0;
     const EXTENSIONS_SETTLE: Duration = Duration::from_millis(7000);
@@ -166,6 +179,18 @@ mod native {
     const RIGHT_MOUSE_DOWN: u64 = 3;
     const COMMAND_KEY: u64 = 1 << 20;
     const SHIFT_KEY: u64 = 1 << 17;
+    const CONTROL_KEY: u64 = 1 << 18;
+    const OPTION_KEY: u64 = 1 << 19;
+
+    // Ignore Caps Lock and device-specific flags, but never steal a chord with
+    // Control or Option from the app or the page.
+    fn browser_command_shift(flags: u64) -> Option<bool> {
+        match flags & (COMMAND_KEY | SHIFT_KEY | CONTROL_KEY | OPTION_KEY) {
+            COMMAND_KEY => Some(false),
+            flags if flags == COMMAND_KEY | SHIFT_KEY => Some(true),
+            _ => None,
+        }
+    }
     const WIDTH_AND_HEIGHT: u64 = 2 | 16;
     const BOTTOM_LEFT_AND_RIGHT: u64 = 1 | 2;
     const PUMP_AT_LEAST_EVERY: Duration = Duration::from_millis(250);
@@ -182,7 +207,12 @@ mod native {
         browser: Option<Browser>,
         url: String,
         title: String,
+        /// Page zoom on screen: the pane's size, times the person's own step.
         zoom: f64,
+        /// 1 keeps the size's zoom. Zoom in and out move this, for this pane only.
+        user_zoom: f64,
+        width: f64,
+        height: f64,
         shown: bool,
         // Top-left in the window, as layout gives it. AppKit counts from the bottom.
         top: f64,
@@ -623,6 +653,31 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         factor.ln() / ZOOM_BASE.ln()
     }
 
+    /// This pane's zoom from its own size. Too small to be a pane yet (a page
+    /// opened before it is drawn) keeps the ordinary zoom.
+    fn size_zoom(width: f64, height: f64) -> f64 {
+        if width < 50.0 || height < 50.0 {
+            return DEFAULT_ZOOM;
+        }
+        let by_size = DEFAULT_ZOOM * width / ZOOM_REFERENCE_WIDTH;
+        ((by_size / ZOOM_SIZE_STEP).round() * ZOOM_SIZE_STEP).clamp(ZOOM_READABLE, ZOOM_MAX)
+    }
+
+    fn effective_zoom(width: f64, height: f64, user: f64) -> f64 {
+        (size_zoom(width, height) * user).clamp(ZOOM_MIN, ZOOM_MAX)
+    }
+
+    fn step_user_zoom(width: f64, height: f64, user: f64, how: &str) -> f64 {
+        let base = size_zoom(width, height);
+        let effective = effective_zoom(width, height, user);
+        match how {
+            "in" => ZOOMS.iter().copied().find(|z| *z > effective + 0.01).unwrap_or(ZOOM_MAX) / base,
+            "out" => ZOOMS.iter().copied().rev().find(|z| *z < effective - 0.01).unwrap_or(ZOOM_MIN) / base,
+            // Back to whatever this pane's size asks for.
+            _ => 1.0,
+        }
+    }
+
     wrap_app! {
         struct HerdrCefApp;
 
@@ -708,12 +763,37 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 Some(PageFullscreen::new())
             }
 
+            fn load_handler(&self) -> Option<LoadHandler> {
+                Some(PageLoad::new())
+            }
+
+            fn download_handler(&self) -> Option<DownloadHandler> {
+                Some(PageDownloads::new())
+            }
+
             fn permission_handler(&self) -> Option<PermissionHandler> {
                 Some(PagePermissions::new())
             }
 
             fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
                 Some(PageMenu::new())
+            }
+        }
+    }
+
+    // Alloy has no default download UI. Ask the person where to save each file.
+    wrap_download_handler! {
+        struct PageDownloads;
+
+        impl DownloadHandler {
+            fn can_download(&self, _browser: Option<&mut Browser>, _url: Option<&CefString>, _request_method: Option<&CefString>) -> i32 {
+                1
+            }
+
+            fn on_before_download(&self, _browser: Option<&mut Browser>, _item: Option<&mut DownloadItem>, _suggested_name: Option<&CefString>, callback: Option<&mut BeforeDownloadCallback>) -> i32 {
+                let Some(callback) = callback else { return 0 };
+                callback.cont(None, 1);
+                1
             }
         }
     }
@@ -769,6 +849,25 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                         }
                     });
                 }
+            }
+        }
+    }
+
+    // A new document has no zoom of its own yet. Put this pane's back once the main frame has loaded.
+    wrap_load_handler! {
+        struct PageLoad;
+
+        impl LoadHandler {
+            fn on_load_end(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _http_status_code: i32) {
+                let (Some(browser), Some(frame)) = (browser, frame) else { return };
+                if frame.is_main() == 0 { return };
+                let identifier = browser.identifier();
+                VIEWS.with(|views| {
+                    let Ok(views) = views.try_borrow() else { return };
+                    if let Some(view) = views.values().find(|view| view.browser.as_ref().is_some_and(|b| b.identifier() == identifier)) {
+                        apply_zoom(view);
+                    }
+                });
             }
         }
     }
@@ -1265,10 +1364,10 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 if is_view == NO { NO } else { msg_send![responder, isDescendantOf: host] }
             };
             let flags: u64 = msg_send![event, modifierFlags];
-            if mine != NO && flags & COMMAND_KEY != 0 {
+            if mine != NO && let Some(shift) = browser_command_shift(flags) {
                 let keys: Id = msg_send![event, charactersIgnoringModifiers];
                 let key = rust_string(keys).to_lowercase();
-                if shortcut(host, &key, flags & SHIFT_KEY != 0) {
+                if shortcut(host, &key, shift) {
                     return YES;
                 }
             }
@@ -1282,20 +1381,18 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             let Some(browser) = view.browser.clone() else { return false };
             let frame = browser.focused_frame().or_else(|| browser.main_frame());
             match (key, frame) {
-                ("a", Some(frame)) => frame.select_all(),
-                ("c", Some(frame)) => frame.copy(),
-                ("v", Some(frame)) => frame.paste(),
-                ("x", Some(frame)) => frame.cut(),
+                ("a", Some(frame)) if !shift => frame.select_all(),
+                ("c", Some(frame)) if !shift => frame.copy(),
+                ("v", Some(frame)) if !shift => frame.paste(),
+                ("x", Some(frame)) if !shift => frame.cut(),
                 ("z", Some(frame)) if shift => frame.redo(),
                 ("z", Some(frame)) => frame.undo(),
+                ("r", _) if shift => browser.reload_ignore_cache(),
                 ("r", _) => browser.reload(),
-                ("[", _) => browser.go_back(),
-                ("]", _) => browser.go_forward(),
-                // The arrow keys arrive as function-key characters (NSLeftArrowFunctionKey).
-                ("\u{f702}", _) => browser.go_back(),
-                ("\u{f703}", _) => browser.go_forward(),
-                ("l", _) => view.asked = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis() as u64),
-                ("e", _) => {
+                ("[", _) if !shift => browser.go_back(),
+                ("]", _) if !shift => browser.go_forward(),
+                ("l", _) if !shift => view.asked = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis() as u64),
+                ("e", _) if !shift => {
                     // The pane holding this page, not the page: the app zooms its focused pane.
                     ZOOM_CALLBACK.with_borrow(|callback| {
                         if let Some(callback) = callback {
@@ -1362,9 +1459,11 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
     }
 
     fn apply_zoom(view: &View) {
-        if let Some(host) = view.browser.as_ref().and_then(|browser| browser.host()) {
-            host.set_zoom_level(zoom_level(view.zoom));
-        }
+        let Some(browser) = view.browser.as_ref() else { return };
+        let Some(host) = browser.host() else { return };
+        // Use Chromium's own zoom: it reflows the page, as the browser menu's
+        // Zoom In/Out/Actual Size imply. (It is shared by every pane on a site.)
+        host.set_zoom_level(zoom_level(view.zoom));
     }
 
     // A closing page takes the window it's in along with it, so it leaves the app's window first. It
@@ -1542,6 +1641,9 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 url: String::new(),
                 title: String::new(),
                 zoom: DEFAULT_ZOOM,
+                user_zoom: 1.0,
+                width: 0.0,
+                height: 0.0,
                 shown: true,
                 top: 0.0,
                 left: 0.0,
@@ -1555,15 +1657,27 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             view.top = top;
             view.left = left;
             // A page lifted to the window covers it; the pane's bounds come back when it ends.
-            let frame = if view.os_fullscreen {
-                NsRect { origin: Point { x: 0.0, y: 0.0 }, size: space.size }
-            } else {
-                NsRect { origin: Point { x: left, y: space.size.h - top - height }, size: Size { w: width, h: height } }
+            let (laid_w, laid_h) = if view.os_fullscreen { (space.size.w, space.size.h) } else { (width, height) };
+            view.width = laid_w;
+            view.height = laid_h;
+            let next = effective_zoom(view.width, view.height, view.user_zoom);
+            let zoom_changed = (view.zoom - next).abs() > 0.005;
+            if zoom_changed {
+                view.zoom = next;
+            }
+            let frame = NsRect {
+                origin: Point { x: if view.os_fullscreen { 0.0 } else { left }, y: if view.os_fullscreen { 0.0 } else { space.size.h - top - height } },
+                size: Size { w: laid_w, h: laid_h },
             };
             unsafe {
                 let _: () = msg_send![view.host, setFrame: frame];
             }
             apply_mask(view);
+            // Rescale this pane when its size changed. A page that does not exist yet
+            // gets it once the browser is created, below.
+            if zoom_changed && view.browser.is_some() {
+                apply_zoom(view);
+            }
             if view.browser.is_none() && width > 0.0 && height > 0.0 { Some(view.host) } else { None }
         });
         // Creating a browser runs the message loop, which reaches back into VIEWS.
@@ -1655,7 +1769,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
         VIEWS.with_borrow_mut(|views| {
             views.insert(id.to_owned(), View {
                 host, browser: Some(browser), url: url.to_owned(), title: String::new(),
-                zoom: DEFAULT_ZOOM, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
+                zoom: DEFAULT_ZOOM, user_zoom: 1.0, width: 0.0, height: 0.0, shown: false, top: 0.0, left: 0.0, asked: 0, hole: None, normal: None,
                 media_fullscreen: false, os_fullscreen: false, audible: false,
             });
         });
@@ -1732,21 +1846,24 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
                 if kind == KEY_DOWN {
                     let Some(id) = page_with_keys() else { return event };
                     let flags: u64 = unsafe { msg_send![event, modifierFlags] };
-                    if flags & (1 << 20) == 0 {
-                        return event;
-                    }
+                    let Some(shift) = browser_command_shift(flags) else { return event };
                     let code: u16 = unsafe { msg_send![event, keyCode] };
-                    let shift = flags & (1 << 17) != 0;
                     let browser = || VIEWS.with_borrow(|views| views.get(&id).and_then(|view| view.browser.clone()));
                     let handled = match (code, shift) {
                         (45, true) => { command(&id, "private", if is_private(&id) { "off" } else { "on" }); true } // Cmd+Shift+N
                         (35, false) => { if let Some(browser) = browser() { if let Some(host) = browser.host() { host.print(); } } true } // Cmd+P
-                        (15, _) => { if let Some(browser) = browser() { browser.reload(); } true } // Cmd+R
-                        (33, _) => { if let Some(browser) = browser() { browser.go_back(); } true } // Cmd+[
-                        (30, _) => { if let Some(browser) = browser() { browser.go_forward(); } true } // Cmd+]
+                        (15, false) => { if let Some(browser) = browser() { browser.reload(); } true } // Cmd+R
+                        (15, true) => { if let Some(browser) = browser() { browser.reload_ignore_cache(); } true } // Cmd+Shift+R
+                        (33, false) => { if let Some(browser) = browser() { browser.go_back(); } true } // Cmd+[
+                        (30, false) => { if let Some(browser) = browser() { browser.go_forward(); } true } // Cmd+]
                         (24, _) => { command(&id, "zoom", "in"); true } // Cmd+=
-                        (27, _) => { command(&id, "zoom", "out"); true } // Cmd+-
-                        (29, _) => { command(&id, "zoom", "reset"); true } // Cmd+0
+                        (27, false) => { command(&id, "zoom", "out"); true } // Cmd+-
+                        (29, false) => { command(&id, "zoom", "reset"); true } // Cmd+0
+                        (3, false) => { if let Some(browser) = browser() { if let Some(frame) = browser.main_frame() { let _ = frame.execute_java_script(Some(&CefString::from("window.find()")), None, 0); } } true } // Cmd+F
+                        (8, false) => { if let Some(browser) = browser() { if let Some(frame) = browser.main_frame() { let _ = frame.execute_java_script(Some(&CefString::from("document.execCommand('copy')")), None, 0); } } true } // Cmd+C
+                        (7, false) => { if let Some(browser) = browser() { if let Some(frame) = browser.main_frame() { let _ = frame.execute_java_script(Some(&CefString::from("document.execCommand('cut')")), None, 0); } } true } // Cmd+X
+                        (9, false) => { if let Some(browser) = browser() { if let Some(frame) = browser.main_frame() { let _ = frame.execute_java_script(Some(&CefString::from("navigator.clipboard.readText().then(t=>document.execCommand('insertText',false,t)).catch(()=>{})")), None, 0); } } true } // Cmd+V
+                        (0, false) => { if let Some(browser) = browser() { if let Some(frame) = browser.main_frame() { let _ = frame.execute_java_script(Some(&CefString::from("document.execCommand('selectAll')")), None, 0); } } true } // Cmd+A
                         _ => false,
                     };
                     return if handled { NIL } else { event };
@@ -1838,7 +1955,7 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
     }
 
     // A browser's own record of what's on show. Its display callbacks don't arrive for a page in a
-    // view parented like this. Zoom goes with the site, so a new address gets it again.
+    // view parented like this. A new document drops this pane's zoom, so a new address puts it back.
     fn refresh(view: &mut View) {
         let Some(entry) = view.browser.as_ref().and_then(|browser| browser.host()).and_then(|host| host.visible_navigation_entry()) else { return };
         let url = CefString::from(&entry.url()).to_string();
@@ -1890,12 +2007,8 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
     }
 
     fn zoom(view: &mut View, how: &str) {
-        let at = ZOOMS.iter().position(|z| (*z - view.zoom).abs() < 0.001).unwrap_or(4);
-        view.zoom = match how {
-            "in" => ZOOMS[(at + 1).min(ZOOMS.len() - 1)],
-            "out" => ZOOMS[at.saturating_sub(1)],
-            _ => DEFAULT_ZOOM,
-        };
+        view.user_zoom = step_user_zoom(view.width, view.height, view.user_zoom, how);
+        view.zoom = effective_zoom(view.width, view.height, view.user_zoom);
         apply_zoom(view);
     }
 
@@ -2706,5 +2819,77 @@ chrome.runtime.sendMessage({ what: 'herdr:wake' }).catch(( ) => { });
             }
         }
         apply_visibility();
+    }
+
+    #[cfg(test)]
+    mod zoom_tests {
+        use super::{
+            DEFAULT_ZOOM, ZOOM_MAX, ZOOM_MIN, ZOOM_READABLE, ZOOM_REFERENCE_WIDTH, ZOOM_SIZE_STEP, COMMAND_KEY, SHIFT_KEY, CONTROL_KEY, OPTION_KEY,
+            PageClient, browser_command_shift, effective_zoom, size_zoom, step_user_zoom,
+        };
+        use cef::{ImplClient, ImplDownloadHandler};
+
+        #[test]
+        fn browser_shortcuts_do_not_steal_other_modifiers() {
+            assert_eq!(browser_command_shift(COMMAND_KEY), Some(false));
+            assert_eq!(browser_command_shift(COMMAND_KEY | SHIFT_KEY), Some(true));
+            assert_eq!(browser_command_shift(COMMAND_KEY | OPTION_KEY), None);
+            assert_eq!(browser_command_shift(COMMAND_KEY | SHIFT_KEY | OPTION_KEY), None);
+            assert_eq!(browser_command_shift(COMMAND_KEY | CONTROL_KEY), None);
+            assert_eq!(browser_command_shift(0), None);
+        }
+
+        #[test]
+        fn downloads_are_allowed_and_missing_callbacks_fail_closed() {
+            let handler = PageClient::new().download_handler().expect("browser download handler");
+            assert_eq!(handler.can_download(None, None, None), 1);
+            assert_eq!(handler.on_before_download(None, None, None, None), 0);
+        }
+
+        #[test]
+        fn pages_scale_with_their_pane() {
+            let full = size_zoom(ZOOM_REFERENCE_WIDTH, 800.0);
+            assert!((full - DEFAULT_ZOOM).abs() < 1e-9);
+            // Bigger panes show everything larger, smaller ones smaller.
+            assert!(size_zoom(1600.0, 1000.0) > full);
+            assert!(size_zoom(2400.0, 1600.0) > size_zoom(1600.0, 1000.0));
+            assert!(size_zoom(1000.0, 800.0) < full);
+            // Height doesn't shrink a wide pane's text.
+            assert_eq!(size_zoom(1200.0, 300.0), full);
+            // Manual zoom is a step on top of the size, and reset is the size again.
+            let stepped = effective_zoom(ZOOM_REFERENCE_WIDTH, 800.0, 1.2);
+            assert!((stepped - DEFAULT_ZOOM * 1.2).abs() < 1e-9);
+            assert_eq!(effective_zoom(900.0, 800.0, 1.0), size_zoom(900.0, 800.0));
+        }
+
+        #[test]
+        fn small_panes_stop_at_a_readable_size() {
+            assert_eq!(size_zoom(600.0, 800.0), ZOOM_READABLE);
+            assert_eq!(size_zoom(300.0, 300.0), ZOOM_READABLE);
+            assert_eq!(size_zoom(10_000.0, 800.0), ZOOM_MAX);
+            // Not laid out yet: the ordinary zoom.
+            assert_eq!(size_zoom(0.0, 0.0), DEFAULT_ZOOM);
+        }
+
+        #[test]
+        fn dragging_a_divider_moves_zoom_in_steps() {
+            assert_eq!(size_zoom(1000.0, 800.0), size_zoom(1004.0, 800.0));
+            let z = size_zoom(1013.0, 800.0);
+            assert!(((z / ZOOM_SIZE_STEP).round() * ZOOM_SIZE_STEP - z).abs() < 1e-9);
+        }
+
+        #[test]
+        fn manual_zoom_steps_from_the_clamped_value_and_resets() {
+            let (width, height) = (600.0, 800.0);
+            let down = step_user_zoom(width, height, 1.0, "out");
+            assert!((effective_zoom(width, height, down) - 0.5).abs() < 1e-9);
+            assert_eq!(step_user_zoom(width, height, down, "reset"), 1.0);
+            // After a resize clamps the effective zoom, the next step must still move.
+            let down_from_max = step_user_zoom(width, height, 10.0, "out");
+            assert!((effective_zoom(width, height, down_from_max) - 1.75).abs() < 1e-9);
+            let up_from_min = step_user_zoom(width, height, 0.01, "in");
+            assert!((effective_zoom(width, height, up_from_min) - 0.5).abs() < 1e-9);
+            assert_eq!(effective_zoom(width, height, 0.01), ZOOM_MIN);
+        }
     }
 }

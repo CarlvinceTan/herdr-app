@@ -7172,6 +7172,7 @@ globalThis.__gpui = (() => {
           replace: (text) => __editor_text_call(handle, "replace", [String(text)]),
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
+          focus: () => __editor_focus(handle),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           focus: () => __editor_focus(handle),
           release: () => __editor_release(handle),
