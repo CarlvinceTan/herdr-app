@@ -81,10 +81,19 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     let tx = test_notifications(tx, executor);
     let root = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     let base = root.clone();
+    // Files and mod folders that are symlinks (a dotfiles repo owning them) change at their real
+    // paths, which the OS watcher reports there, outside `root`. Watch those too and report their
+    // changes as the linked paths, so an edit made through the link's target reloads like any other.
+    let links = linked_targets(&root);
+    let event_links = links.clone();
     let revisions = Arc::new(Mutex::new(Revisions::default()));
     let event_revisions = revisions.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let mut revisions = event_revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let event = event.map(|mut e| {
+            e.paths = e.paths.into_iter().map(|path| as_linked(&event_links, path)).collect();
+            e
+        });
         let (changed, rescan) = changes(&base, event);
         revisions.changed(&changed, rescan);
         drop(revisions);
@@ -98,8 +107,40 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     .map_err(|e| tracing::warn!("file watching unavailable ({e}); polling instead"))
     .ok()?;
     watcher.watch(&root, RecursiveMode::Recursive).map_err(|e| tracing::warn!("cannot watch {} ({e}); polling instead", root.display())).ok()?;
+    for (target, linked) in &links {
+        let mode = if target.is_dir() { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+        if let Err(e) = watcher.watch(target, mode) {
+            tracing::warn!("cannot watch {} for {} ({e})", target.display(), linked.display());
+        }
+    }
     WATCHER.set(std::sync::Mutex::new(watcher)).ok()?;
     Some(FileEvents { changes: rx, root, revisions })
+}
+
+/// The real paths behind the watched files and mod folders that are symlinks, each with the path
+/// under `root` that links to it. Targets inside `root` need nothing: the root watch sees them.
+fn linked_targets(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut candidates: Vec<PathBuf> = ["settings.json", "keys.json", "programs.json"].iter().map(|f| root.join(f)).collect();
+    for dir in ["mods", "layouts", "themes"] {
+        if let Ok(entries) = std::fs::read_dir(root.join(dir)) {
+            candidates.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    candidates.into_iter()
+        .filter(|path| path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
+        .filter_map(|path| Some((path.canonicalize().ok()?, path)))
+        .filter(|(target, _)| !target.starts_with(root))
+        .collect()
+}
+
+/// An event path under a link's target, as the same path under the link.
+fn as_linked(links: &[(PathBuf, PathBuf)], path: PathBuf) -> PathBuf {
+    for (target, linked) in links {
+        if let Ok(rest) = path.strip_prefix(target) {
+            return if rest.as_os_str().is_empty() { linked.clone() } else { linked.join(rest) };
+        }
+    }
+    path
 }
 
 // Native callbacks cannot wake GPUI's deterministic test scheduler directly.
@@ -492,6 +533,28 @@ pub fn mod_of(rel: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_symlinked_mod_or_file_reports_its_changes_as_the_linked_path() {
+        let dir = std::env::temp_dir().join(format!("herdr-links-{}", std::process::id()));
+        let home = dir.join("home");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(home.join("mods")).unwrap();
+        std::fs::create_dir_all(repo.join("my-mod")).unwrap();
+        std::fs::write(repo.join("my-mod/main.js"), "").unwrap();
+        std::fs::write(repo.join("keys.json"), "{}").unwrap();
+        std::fs::create_dir_all(home.join("mods/plain")).unwrap();
+        std::os::unix::fs::symlink(repo.join("my-mod"), home.join("mods/my-mod")).unwrap();
+        std::os::unix::fs::symlink(repo.join("keys.json"), home.join("keys.json")).unwrap();
+        let root = home.canonicalize().unwrap();
+        let links = super::linked_targets(&root);
+        assert_eq!(links.len(), 2, "{links:?}");
+        let real = repo.canonicalize().unwrap();
+        assert_eq!(super::as_linked(&links, real.join("my-mod/main.js")), root.join("mods/my-mod/main.js"));
+        assert_eq!(super::as_linked(&links, real.join("keys.json")), root.join("keys.json"));
+        assert_eq!(super::as_linked(&links, root.join("mods/plain/main.js")), root.join("mods/plain/main.js"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
